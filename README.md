@@ -1,8 +1,6 @@
 # ironclaw-railway
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/4VTN88?referralCode=4pD7Sc&utm_medium=integration&utm_source=template&utm_campaign=generic)
-
-Deploy IronClaw on Railway with PostgreSQL and pgvector.
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/ironclaw?referralCode=4pD7Sc&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
 This repository provides a Railway-ready deployment wrapper for IronClaw so it can run correctly in a hosted environment without the common issues that appear when deploying the upstream project directly.
 
@@ -23,7 +21,7 @@ This setup handles the major problems that usually appear in Railway:
 
 Click the button above, or use this link directly:
 
-https://railway.com/deploy/4VTN88?referralCode=4pD7Sc&utm_medium=integration&utm_source=template&utm_campaign=generic
+https://railway.com/deploy/ironclaw?referralCode=4pD7Sc&utm_medium=integration&utm_source=template&utm_campaign=generic
 
 ## What this template includes
 
