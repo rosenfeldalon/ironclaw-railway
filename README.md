@@ -1,98 +1,214 @@
 # ironclaw-railway
 
-Deploy IronClaw on Railway with PostgreSQL + pgvector.
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/4VTN88?referralCode=4pD7Sc&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
-Railway-ready wrapper for deploying [IronClaw](https://github.com/nearai/ironclaw) with PostgreSQL and pgvector.
+Deploy IronClaw on Railway with PostgreSQL and pgvector.
 
-## What this repo does
+This repository provides a Railway-ready deployment wrapper for IronClaw so it can run correctly in a hosted environment without the common issues that appear when deploying the upstream project directly.
 
-The upstream IronClaw project is not directly optimized for Railway public networking in its default form. This wrapper makes it easier to deploy IronClaw on Railway by adding a small public-facing proxy layer and a simple container entrypoint suitable for Railway.
+## Overview
 
-This setup is designed to work with:
+IronClaw is a secure AI assistant with chat, memory, jobs, routines, and a web interface. This repository adapts IronClaw for Railway by adding the pieces needed for a smooth hosted deployment.
 
-* IronClaw app service
-* PostgreSQL service with pgvector
-* Railway private networking
-* Railway public HTTP domain for the app
+This setup handles the major problems that usually appear in Railway:
 
-## Included files
+- skipping interactive first-run onboarding
+- avoiding localhost-only gateway access
+- preventing port conflicts between the gateway and HTTP webhook channel
+- running behind a public HTTP wrapper
+- using PostgreSQL with pgvector for persistence
+- making deployment easier for users who do not want to inspect logs manually
 
-* `Dockerfile` — builds IronClaw and packages the Railway-ready runtime
-* `Caddyfile` — exposes Railway's public port and proxies traffic to IronClaw
-* `docker-entrypoint.sh` — starts IronClaw and the proxy inside the container
+## Deploy
 
-## Services required in Railway
+Click the button above, or use this link directly:
 
-This deployment uses 2 services:
+https://railway.com/deploy/4VTN88?referralCode=4pD7Sc&utm_medium=integration&utm_source=template&utm_campaign=generic
 
-1. `ironclaw` — this repo
-2. `Postgres` — Docker image using pgvector
+## What this template includes
+
+This Railway template includes:
+
+- IronClaw application service
+- PostgreSQL service with pgvector
+- public web access through a wrapper/proxy layer
+- non-interactive startup for hosted environments
+- persistent PostgreSQL storage
+- private internal networking between services
+
+## Why this wrapper exists
+
+The upstream IronClaw project is designed mainly for local or self-managed environments. When deploying to Railway, several things need to be adapted:
+
+- the default onboarding flow is interactive
+- the internal gateway runs on localhost
+- the public web entrypoint must listen on the Railway service port
+- the webhook channel must not conflict with the public proxy port
+- hosted users need a cleaner out-of-the-box experience
+
+This repository solves those issues so the app starts correctly on Railway.
+
+## Architecture
+
+This deployment uses two services.
+
+### 1. ironclaw
+
+The main application service built from this repository.
+
+Responsibilities:
+
+- starts IronClaw with Railway-friendly configuration
+- skips interactive onboarding
+- proxies public traffic to the internal IronClaw gateway
+- keeps the UI accessible from the Railway public domain
+
+### 2. Postgres
+
+A PostgreSQL database service using pgvector.
+
+Responsibilities:
+
+- stores IronClaw data persistently
+- supports vector-based features through pgvector
+- stays private inside Railway internal networking
 
 Recommended Postgres image:
 
-```
-pgvector/pgvector:pg16-trixie
-```
+    pgvector/pgvector:pg16-trixie
 
-## Railway variables
+## Key Railway-specific changes
+
+This wrapper includes several important deployment changes.
+
+### 1. Non-interactive startup
+
+Interactive first-run onboarding is skipped by preconfiguring the required environment variables for hosted deployment.
+
+### 2. Public wrapper/proxy
+
+IronClaw’s internal gateway runs locally, while the wrapper exposes the public Railway HTTP port and forwards traffic correctly.
+
+### 3. Port separation
+
+The public wrapper and IronClaw HTTP webhook channel run on separate ports to avoid bind conflicts.
+
+Recommended split:
+
+- public wrapper: 8080
+- IronClaw webhook channel: 8081
+- internal IronClaw gateway: 3000
+
+### 4. Persistent database
+
+Postgres uses a mounted volume so data survives redeploys.
+
+### 5. Railway-friendly networking
+
+- IronClaw is exposed publicly
+- Postgres stays private
+- internal service communication uses Railway private networking
+
+## Environment variables
 
 ### IronClaw service
 
-```
-DATABASE_URL=postgresql://${{Postgres.POSTGRES_USER}}:${{Postgres.POSTGRES_PASSWORD}}@Postgres.railway.internal:5432/${{Postgres.POSTGRES_DB}}?sslmode=disable
-LLM_BACKEND=openai
-OPENAI_API_KEY=your_openai_api_key
-SANDBOX_ENABLED=false
-```
+Use these variables on the IronClaw service:
+
+    DATABASE_URL=postgresql://${{Postgres.POSTGRES_USER}}:${{Postgres.POSTGRES_PASSWORD}}@Postgres.railway.internal:5432/${{Postgres.POSTGRES_DB}}?sslmode=disable
+    LLM_BACKEND=openai
+    OPENAI_API_KEY=your_openai_api_key
+    ONBOARD_COMPLETED=true
+    SANDBOX_ENABLED=false
+    PORT=8080
+    HTTP_HOST=0.0.0.0
+    HTTP_PORT=8081
+    HTTP_WEBHOOK_SECRET=${{ secret(32) }}
 
 ### Postgres service
 
-```
-POSTGRES_DB=ironclaw
-POSTGRES_USER=ironclaw
-POSTGRES_PASSWORD=${{ secret(16) }}
-PGDATA=/var/lib/postgresql/data/pgdata
-```
+Use these variables on the Postgres service:
 
-## Railway networking
+    POSTGRES_DB=ironclaw
+    POSTGRES_USER=ironclaw
+    POSTGRES_PASSWORD=${{ secret(16) }}
+    PGDATA=/var/lib/postgresql/data/pgdata
+
+## Storage
+
+### Postgres volume
+
+Enable a persistent volume for Postgres.
+
+Recommended mount path:
+
+    /var/lib/postgresql/data
+
+## Networking
 
 ### IronClaw service
 
-* Public HTTP domain: enabled
+- public HTTP domain enabled
+- public wrapper listens on port 8080
 
 ### Postgres service
 
-* Public domain: disabled
-* Volume: enabled
+- no public domain
+- private networking only
+- persistent volume enabled
 
-Recommended volume mount path for Postgres:
+## User experience notes
 
-```
-/var/lib/postgresql/data
-```
+After deployment, the app loads through the Railway public domain and opens the IronClaw UI.
 
-## Notes
+This wrapper was updated to solve:
 
-* IronClaw may log a local gateway URL with a token during startup.
-* If needed, use your Railway public domain together with the token query string shown in the logs.
-* Docker sandbox features are disabled in this setup because Railway does not provide Docker-in-Docker in this deployment model.
+- first-run onboarding issues
+- gateway accessibility problems
+- HTTP webhook secret requirement
+- port collision between Caddy and IronClaw HTTP channel
+- Railway public access routing
 
-## Suggested GitHub topics
+## Repository files
 
-* railway
-* ironclaw
-* ai-assistant
-* rust
-* postgresql
-* pgvector
-* self-hosted
-* railway-template
+This repository includes:
+
+- `Dockerfile` — builds and packages the Railway-ready runtime
+- `Caddyfile` — exposes the public Railway port and proxies traffic to IronClaw
+- `docker-entrypoint.sh` — starts IronClaw and the public proxy with the required startup behavior
+- `README.md` — deployment instructions and template information
+
+## Recommended use cases
+
+This template is a good fit for:
+
+- personal AI assistant hosting
+- secure chat and memory workflows
+- routine and job automation
+- hosted demos of IronClaw
+- fast Railway-based evaluation environments
+
+## Important notes
+
+- This repository is a Railway deployment wrapper, not the upstream IronClaw project itself.
+- The upstream project remains the source for IronClaw application development.
+- This wrapper focuses specifically on reliable Railway deployment behavior.
+
+## Upstream project
+
+Original project:
+
+https://github.com/nearai/ironclaw
 
 ## Credits
 
-* Upstream project: [nearai/ironclaw](https://github.com/nearai/ironclaw)
-* This repo is a Railway deployment wrapper and is not the original IronClaw project.
+- Upstream project: nearai/ironclaw
+- Railway deployment wrapper: this repository
+
+## Suggested tags
+
+railway, ironclaw, ai-assistant, rust, postgresql, pgvector, self-hosted, automation
 
 ## License
 
-Review the upstream IronClaw license before publishing or redistributing this wrapper.
+Review the upstream IronClaw license before redistributing or publishing derivative deployment wrappers.
