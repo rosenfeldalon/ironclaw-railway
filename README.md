@@ -48,6 +48,20 @@ The upstream IronClaw project is designed mainly for local or self-managed envir
 
 This repository solves those issues so the app starts correctly on Railway.
 
+## Gateway Token
+
+IronClaw’s web gateway uses a login token to protect access to the browser UI.
+
+This means that after deployment, users may see a token prompt before entering the application. This token is not the same as your OpenAI or other LLM provider API key. It is used only for authenticating access to the IronClaw web interface.
+
+Why this exists:
+
+- protects the hosted UI from unauthorized access
+- keeps the internal assistant interface gated behind authentication
+- adds a simple security layer for public deployments
+
+In the current Railway deployment flow, the token may be shown by IronClaw at runtime. For a more user-friendly template, the deployment can be extended to generate and inject a stable token automatically so users do not need to search for it manually.
+
 ## Architecture
 
 This deployment uses two services.
