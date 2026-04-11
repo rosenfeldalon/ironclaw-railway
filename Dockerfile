@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-RUN git clone --depth 1 --branch v0.20.0 https://github.com/nearai/ironclaw.git /build/ironclaw
+RUN git clone --depth 1 --branch v0.25.0 https://github.com/nearai/ironclaw.git /build/ironclaw
 
 WORKDIR /build/ironclaw
 
