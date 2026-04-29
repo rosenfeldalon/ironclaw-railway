@@ -4,6 +4,8 @@
 
 This repository provides a Railway-ready deployment wrapper for IronClaw so it can run correctly in a hosted environment without the common issues that appear when deploying the upstream project directly.
 
+The Dockerfile currently builds upstream IronClaw `ironclaw-v0.27.0` by default. Override the build arg `IRONCLAW_REF` only when intentionally testing another upstream ref.
+
 ## Overview
 
 IronClaw is a secure AI assistant with chat, memory, jobs, routines, and a web interface. This repository adapts IronClaw for Railway by adding the pieces needed for a smooth hosted deployment.
@@ -13,6 +15,7 @@ This setup handles the major problems that usually appear in Railway:
 - skipping interactive first-run onboarding
 - avoiding localhost-only gateway access
 - preventing port conflicts between the gateway and HTTP webhook channel
+- keeping the `ironclaw` CLI available for diagnostic commands
 - running behind a public HTTP wrapper
 - using PostgreSQL with pgvector for persistence
 - making deployment easier for users who do not want to inspect logs manually
@@ -128,14 +131,23 @@ Postgres uses a mounted volume so data survives redeploys.
 Use these variables on the IronClaw service:
 
     DATABASE_URL=postgresql://${{Postgres.POSTGRES_USER}}:${{Postgres.POSTGRES_PASSWORD}}@Postgres.railway.internal:5432/${{Postgres.POSTGRES_DB}}?sslmode=disable
-    LLM_BACKEND=openai
-    OPENAI_API_KEY=your_openai_api_key
+    LLM_BACKEND=ollama
+    OPENAI_API_KEY=
     ONBOARD_COMPLETED=true
     SANDBOX_ENABLED=false
+    GATEWAY_ENABLED=true
+    GATEWAY_HOST=127.0.0.1
+    GATEWAY_PORT=3000
+    GATEWAY_AUTH_TOKEN=${{ secret(32) }}
     PORT=8080
     HTTP_HOST=0.0.0.0
     HTTP_PORT=8081
     HTTP_WEBHOOK_SECRET=${{ secret(32) }}
+    SECRETS_MASTER_KEY=${{ secret(64) }}
+    HEARTBEAT_ENABLED=false
+    EMBEDDING_ENABLED=false
+
+Set a real provider and matching secret later, outside logs and repo files, before expecting agent responses that require model calls.
 
 ### Postgres service
 
@@ -187,7 +199,8 @@ This repository includes:
 
 - `Dockerfile` — builds and packages the Railway-ready runtime
 - `Caddyfile` — exposes the public Railway port and proxies traffic to IronClaw
-- `docker-entrypoint.sh` — starts IronClaw and the public proxy with the required startup behavior
+- `docker-entrypoint.sh` — starts IronClaw with non-interactive onboarding disabled, redacts token-bearing startup URLs from platform logs, and starts the public proxy; explicit arguments pass through to the `ironclaw` CLI for diagnostics
+- `railway.toml` — pins the Dockerfile builder and `/api/health` deploy healthcheck
 - `README.md` — deployment instructions and template information
 
 ## Recommended use cases

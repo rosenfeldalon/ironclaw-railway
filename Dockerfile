@@ -8,7 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-RUN git clone --depth 1 --branch ironclaw-v0.26.0 https://github.com/nearai/ironclaw.git /build/ironclaw
+ARG IRONCLAW_REF=ironclaw-v0.27.0
+RUN git clone --depth 1 --branch "${IRONCLAW_REF}" https://github.com/nearai/ironclaw.git /build/ironclaw
 
 WORKDIR /build/ironclaw
 
