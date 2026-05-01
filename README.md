@@ -4,7 +4,7 @@
 
 This repository provides a Railway-ready deployment wrapper for IronClaw so it can run correctly in a hosted environment without the common issues that appear when deploying the upstream project directly.
 
-The Dockerfile currently builds upstream IronClaw `ironclaw-v0.27.0` by default. Override the build arg `IRONCLAW_REF` only when intentionally testing another upstream ref.
+The Dockerfile currently builds upstream IronClaw `ironclaw-v0.27.0` and applies the small Simon runtime patch in `patches/` during the Docker build. Override `IRONCLAW_REPO` and `IRONCLAW_REF` only when intentionally testing a different IronClaw source.
 
 ## Overview
 

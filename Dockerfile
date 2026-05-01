@@ -8,10 +8,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
+ARG IRONCLAW_REPO=https://github.com/nearai/ironclaw.git
 ARG IRONCLAW_REF=ironclaw-v0.27.0
-RUN git clone --depth 1 --branch "${IRONCLAW_REF}" https://github.com/nearai/ironclaw.git /build/ironclaw
+RUN git clone --depth 1 --branch "${IRONCLAW_REF}" "${IRONCLAW_REPO}" /build/ironclaw
 
 WORKDIR /build/ironclaw
+
+COPY patches/0001-wasm-workspace-reader.patch /tmp/0001-wasm-workspace-reader.patch
+RUN git apply /tmp/0001-wasm-workspace-reader.patch
 
 RUN cargo build --release --bin ironclaw
 

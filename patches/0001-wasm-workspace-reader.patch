@@ -1,0 +1,215 @@
+From 54ea05071b6d7f40f1dd2a1eb24705a444663758 Mon Sep 17 00:00:00 2001
+From: Alon Rosenfeld <rosenfeldalon@gmail.com>
+Date: Fri, 1 May 2026 13:18:21 +0300
+Subject: [PATCH] fix(wasm): wire workspace reads into tools
+
+---
+ src/tools/registry.rs     | 35 +++++++++++++++++++++++++++
+ src/tools/wasm/wrapper.rs | 51 ++++++++++++++++++++++++++++++++++++---
+ 2 files changed, 83 insertions(+), 3 deletions(-)
+
+diff --git a/src/tools/registry.rs b/src/tools/registry.rs
+index 356911ae..d6d8fccf 100644
+--- a/src/tools/registry.rs
++++ b/src/tools/registry.rs
+@@ -126,6 +126,9 @@ pub struct ToolRegistry {
+     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
+     /// Tracks which names were registered via the built-in startup path.
+     builtin_names: RwLock<std::collections::HashSet<String>>,
++    /// Workspace resolver shared by memory tools and WASM workspace reads.
++    workspace_resolver:
++        std::sync::RwLock<Option<Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>>>,
+     /// Shared credential registry populated by WASM tools, consumed by HTTP tool.
+     credential_registry: Option<Arc<SharedCredentialRegistry>>,
+     /// Secrets store for credential injection (shared with HTTP tool).
+@@ -164,6 +167,7 @@ impl ToolRegistry {
+         Self {
+             tools: RwLock::new(HashMap::new()),
+             builtin_names: RwLock::new(std::collections::HashSet::new()),
++            workspace_resolver: std::sync::RwLock::new(None),
+             credential_registry: None,
+             secrets_store: None,
+             role_lookup: None,
+@@ -589,6 +593,7 @@ impl ToolRegistry {
+         reasoning_llm: Option<Arc<dyn crate::llm::LlmProvider>>,
+         reasoning_enabled: bool,
+     ) {
++        self.set_workspace_resolver(Arc::clone(&resolver));
+         self.register_sync(Arc::new(MemorySearchTool::with_reasoning(
+             Arc::clone(&resolver),
+             reasoning_llm,
+@@ -606,6 +611,10 @@ impl ToolRegistry {
+     /// Memory tools require a workspace for persistence. Call this after
+     /// `register_builtin_tools()` if you have a workspace available.
+     pub fn register_memory_tools(&self, workspace: Arc<Workspace>) {
++        let resolver = Arc::new(crate::tools::builtin::memory::FixedWorkspaceResolver::new(
++            Arc::clone(&workspace),
++        ));
++        self.set_workspace_resolver(resolver);
+         self.register_sync(Arc::new(MemorySearchTool::from_workspace(Arc::clone(
+             &workspace,
+         ))));
+@@ -620,6 +629,29 @@ impl ToolRegistry {
+         tracing::debug!("Registered 4 memory tools");
+     }
+ 
++    fn set_workspace_resolver(
++        &self,
++        resolver: Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>,
++    ) {
++        match self.workspace_resolver.write() {
++            Ok(mut slot) => {
++                *slot = Some(resolver);
++            }
++            Err(_) => {
++                tracing::warn!("Failed to store workspace resolver for WASM tools");
++            }
++        }
++    }
++
++    fn workspace_resolver(
++        &self,
++    ) -> Option<Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>> {
++        self.workspace_resolver
++            .read()
++            .ok()
++            .and_then(|slot| slot.as_ref().map(Arc::clone))
++    }
++
+     /// Register job management tools.
+     ///
+     /// Job tools allow the LLM to create, list, check status, and cancel jobs.
+@@ -987,6 +1019,9 @@ impl ToolRegistry {
+         if let Some(interceptor) = &self.http_interceptor {
+             wrapper = wrapper.with_http_interceptor(Arc::clone(interceptor));
+         }
++        if let Some(resolver) = self.workspace_resolver() {
++            wrapper = wrapper.with_workspace_resolver(resolver);
++        }
+ 
+         // Register the tool
+         self.register(Arc::new(wrapper)).await;
+diff --git a/src/tools/wasm/wrapper.rs b/src/tools/wasm/wrapper.rs
+index 26bef557..524fde8e 100644
+--- a/src/tools/wasm/wrapper.rs
++++ b/src/tools/wasm/wrapper.rs
+@@ -22,14 +22,16 @@ use crate::db::UserStore;
+ use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
+ use crate::secrets::SecretsStore;
+ use crate::secrets::host_matches_pattern;
++use crate::tools::builtin::memory::WorkspaceResolver;
+ use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput};
+-use crate::tools::wasm::capabilities::Capabilities;
++use crate::tools::wasm::capabilities::{Capabilities, WorkspaceReader};
+ use crate::tools::wasm::credential_injector::{InjectedCredentials, inject_credential};
+ use crate::tools::wasm::error::WasmError;
+ use crate::tools::wasm::host::{HostState, LogLevel};
+ use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
+ use crate::tools::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolRuntime};
+ use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resolve_http_target};
++use crate::workspace::Workspace;
+ use ironclaw_safety::LeakDetector;
+ 
+ // Generate component model bindings from the WIT file.
+@@ -150,6 +152,26 @@ struct StoreData {
+     http_interceptor: Option<Arc<dyn HttpInterceptor>>,
+ }
+ 
++struct RuntimeWorkspaceReader {
++    workspace: Arc<Workspace>,
++    handle: tokio::runtime::Handle,
++}
++
++impl RuntimeWorkspaceReader {
++    fn new(workspace: Arc<Workspace>, handle: tokio::runtime::Handle) -> Self {
++        Self { workspace, handle }
++    }
++}
++
++impl WorkspaceReader for RuntimeWorkspaceReader {
++    fn read(&self, path: &str) -> Option<String> {
++        self.handle
++            .block_on(self.workspace.read(path))
++            .ok()
++            .map(|doc| doc.content)
++    }
++}
++
+ impl StoreData {
+     fn new(
+         memory_limit: u64,
+@@ -658,6 +680,9 @@ pub struct WasmToolWrapper {
+     /// Optional HTTP interceptor for testing — returns canned responses
+     /// instead of making real requests when set.
+     http_interceptor: Option<Arc<dyn HttpInterceptor>>,
++    /// Workspace resolver used to inject a sync workspace reader per execution
++    /// when the WASM tool declares `workspace.allowed_prefixes`.
++    workspace_resolver: Option<Arc<dyn WorkspaceResolver>>,
+ }
+ 
+ #[derive(Debug, Clone)]
+@@ -877,6 +902,7 @@ impl WasmToolWrapper {
+             role_lookup: None,
+             oauth_refresh: None,
+             http_interceptor: None,
++            workspace_resolver: None,
+         }
+     }
+ 
+@@ -890,6 +916,12 @@ impl WasmToolWrapper {
+         self
+     }
+ 
++    /// Set the workspace resolver used by WASM `workspace_read`.
++    pub fn with_workspace_resolver(mut self, resolver: Arc<dyn WorkspaceResolver>) -> Self {
++        self.workspace_resolver = Some(resolver);
++        self
++    }
++
+     /// Override the tool description.
+     pub fn with_description(mut self, description: impl Into<String>) -> Self {
+         self.description = description.into();
+@@ -1290,17 +1322,29 @@ impl Tool for WasmToolWrapper {
+         }
+         let host_credentials = resolution.resolved;
+ 
++        let mut capabilities = self.capabilities.clone();
++        if let Some(workspace_capability) = &mut capabilities.workspace_read
++            && workspace_capability.reader.is_none()
++            && let Some(resolver) = &self.workspace_resolver
++        {
++            let workspace = resolver.resolve(&ctx.user_id).await;
++            workspace_capability.reader = Some(Arc::new(RuntimeWorkspaceReader::new(
++                workspace,
++                tokio::runtime::Handle::current(),
++            )));
++        }
++
+         // Serialize context for WASM
+         let context_json = serde_json::to_string(ctx).ok();
+ 
+         // Clone what we need for the blocking task
+         let runtime = Arc::clone(&self.runtime);
+         let prepared = Arc::clone(&self.prepared);
+-        let capabilities = self.capabilities.clone();
+         let description = self.description.clone();
+         let schemas = self.schemas.clone();
+         let discovery_summary = self.discovery_summary.clone();
+         let credentials = self.credentials.clone();
++        let http_interceptor = self.http_interceptor.clone();
+ 
+         // Execute in blocking task with timeout
+         let result = tokio::time::timeout(timeout, async move {
+@@ -1315,7 +1359,8 @@ impl Tool for WasmToolWrapper {
+                 secrets_store: None, // Not needed in blocking task
+                 role_lookup: None,
+                 oauth_refresh: None, // Already used above for pre-refresh
+-                http_interceptor: self.http_interceptor.clone(),
++                http_interceptor,
++                workspace_resolver: None, // Reader was injected above.
+             };
+ 
+             tokio::task::spawn_blocking(move || {
+-- 
+2.53.0
+
