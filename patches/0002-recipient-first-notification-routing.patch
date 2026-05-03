@@ -1,0 +1,193 @@
+From 33f1e20c43d37da74277ef0eb71505449f50b2df Mon Sep 17 00:00:00 2001
+From: Alon Rosenfeld <rosenfeldalon@gmail.com>
+Date: Sun, 3 May 2026 12:00:00 +0300
+Subject: [PATCH] fix(routines): prefer bound channel targets over owner aliases
+
+---
+ src/agent/agent_loop.rs     | 34 +++++++++++++++++++++++++-----
+ src/tools/builtin/message.rs | 52 +++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 78 insertions(+), 8 deletions(-)
+
+diff --git a/src/agent/agent_loop.rs b/src/agent/agent_loop.rs
+index 8d08cdfe..5a8b46dd 100644
+--- a/src/agent/agent_loop.rs
++++ b/src/agent/agent_loop.rs
+@@ -139,6 +139,19 @@ fn resolve_owner_scope_notification_user(
+     trimmed_option(explicit_user).or_else(|| trimmed_option(owner_fallback))
+ }
+ 
++fn prefers_channel_notification_target(
++    explicit_user: Option<&str>,
++    owner_fallback: Option<&str>,
++) -> bool {
++    let explicit = trimmed_option(explicit_user);
++    let owner = trimmed_option(owner_fallback);
++
++    match explicit {
++        None => true,
++        Some(explicit_target) => owner.is_some_and(|owner_target| explicit_target == owner_target),
++    }
++}
++
+ fn is_single_message_repl(message: &IncomingMessage) -> bool {
+     message.channel == "repl"
+         && message
+@@ -154,8 +167,10 @@ async fn resolve_channel_notification_user(
+     explicit_user: Option<&str>,
+     owner_fallback: Option<&str>,
+ ) -> Option<String> {
+-    if let Some(user) = trimmed_option(explicit_user) {
+-        return Some(user);
++    let explicit = trimmed_option(explicit_user);
++
++    if !prefers_channel_notification_target(explicit_user, owner_fallback) {
++        return explicit;
+     }
+ 
+     if let Some(channel_name) = trimmed_option(channel)
+@@ -167,7 +182,7 @@ async fn resolve_channel_notification_user(
+         return Some(target);
+     }
+ 
+-    resolve_owner_scope_notification_user(explicit_user, owner_fallback)
++    explicit.or_else(|| trimmed_option(owner_fallback))
+ }
+ 
+ async fn resolve_routine_notification_target(
+@@ -2162,7 +2177,8 @@ impl Agent {
+ #[cfg(test)]
+ mod tests {
+     use super::{
+-        chat_tool_execution_metadata, is_single_message_repl, resolve_routine_notification_user,
++        chat_tool_execution_metadata, is_single_message_repl,
++        prefers_channel_notification_target, resolve_routine_notification_user,
+         should_fallback_routine_notification, truncate_for_preview,
+     };
+     use crate::agent::agent_loop::{Agent, AgentDeps, HandleOutcome};
+@@ -2384,6 +2400,20 @@ mod tests {
+         assert_eq!(resolve_routine_notification_user(&metadata), None); // safety: test-only assertion
+     }
+ 
++    #[test]
++    fn prefers_channel_notification_target_for_owner_scope_alias() {
++        assert!(prefers_channel_notification_target(
++            Some("owner-scope"),
++            Some("owner-scope")
++        ));
++        assert!(prefers_channel_notification_target(None, Some("owner-scope")));
++        assert!(!prefers_channel_notification_target(
++            Some("12345"),
++            Some("owner-scope")
++        ));
++        assert!(!prefers_channel_notification_target(Some("12345"), None));
++    }
++
+     #[test]
+     fn chat_tool_execution_metadata_prefers_message_routing_target() {
+         let message = IncomingMessage::new("telegram", "owner-scope", "hello")
+diff --git a/src/tools/builtin/message.rs b/src/tools/builtin/message.rs
+index 691d9026..375fb6c0 100644
+--- a/src/tools/builtin/message.rs
++++ b/src/tools/builtin/message.rs
+@@ -86,6 +86,22 @@ fn metadata_owner_id(metadata: &serde_json::Value) -> Option<String> {
+     metadata_string(metadata, "owner_id")
+ }
+ 
++fn prefers_channel_notification_target(
++    explicit_target: Option<&str>,
++    owner_scope_target: Option<&str>,
++) -> bool {
++    match (
++        explicit_target.map(str::trim).filter(|value| !value.is_empty()),
++        owner_scope_target
++            .map(str::trim)
++            .filter(|value| !value.is_empty()),
++    ) {
++        (None, _) => true,
++        (Some(explicit), Some(owner_scope)) => explicit == owner_scope,
++        (Some(_), None) => false,
++    }
++}
++
+ fn channel_matches_source(resolved_channel: Option<&str>, source_channel: Option<&str>) -> bool {
+     match (resolved_channel, source_channel) {
+         (None, _) => true,
+@@ -139,6 +155,10 @@ async fn resolve_message_target(inputs: MessageTargetResolution<'_>) -> Option<S
+ 
+     if inputs.has_execution_routing_metadata {
+         if channel_matches_source(inputs.channel, inputs.metadata_channel)
++            && !prefers_channel_notification_target(
++                inputs.metadata_target.as_deref(),
++                inputs.owner_scope_target.as_deref(),
++            )
+             && let Some(target) = inputs.metadata_target
+         {
+             return Some(target);
+@@ -497,6 +517,20 @@ mod tests {
+         assert!(params.get("attachments").is_some());
+     }
+ 
++    #[test]
++    fn prefers_channel_notification_target_for_owner_scope_alias() {
++        assert!(prefers_channel_notification_target(
++            Some("owner-scope"),
++            Some("owner-scope")
++        ));
++        assert!(prefers_channel_notification_target(None, Some("owner-scope")));
++        assert!(!prefers_channel_notification_target(
++            Some("424242"),
++            Some("owner-scope")
++        ));
++        assert!(!prefers_channel_notification_target(Some("424242"), None));
++    }
++
+     /// Regression: LLMs frequently pass {"message": "..."} instead of
+     /// {"content": "..."}. The tool should accept both.
+     #[tokio::test]
+@@ -889,6 +923,44 @@ mod tests {
+         assert_eq!(telegram[0].1.content, "NEAR price is $5");
+     }
+ 
++    #[tokio::test]
++    async fn message_tool_treats_owner_scope_metadata_as_channel_binding_fallback() {
++        let target = resolve_message_target(MessageTargetResolution {
++            extension_manager: None,
++            explicit_target: None,
++            metadata_target: Some("owner-scope".to_string()),
++            owner_scope_target: Some("owner-scope".to_string()),
++            default_target: None,
++            channel: Some("telegram"),
++            metadata_channel: Some("telegram"),
++            default_channel: None,
++            has_execution_routing_metadata: true,
++            ctx_user_id: "interactive-chat-user",
++        })
++        .await;
++
++        assert_eq!(target.as_deref(), Some("owner-scope"));
++    }
++
++    #[tokio::test]
++    async fn message_tool_preserves_explicit_external_metadata_target() {
++        let target = resolve_message_target(MessageTargetResolution {
++            extension_manager: None,
++            explicit_target: None,
++            metadata_target: Some("424242".to_string()),
++            owner_scope_target: Some("owner-scope".to_string()),
++            default_target: None,
++            channel: Some("telegram"),
++            metadata_channel: Some("telegram"),
++            default_channel: None,
++            has_execution_routing_metadata: true,
++            ctx_user_id: "interactive-chat-user",
++        })
++        .await;
++
++        assert_eq!(target.as_deref(), Some("424242"));
++    }
++
+     #[tokio::test]
+     async fn message_tool_falls_back_to_ctx_user_when_owner_scope_absent() {
+         let (tool, gateway_captures, telegram_captures) =
+-- 
+2.53.0

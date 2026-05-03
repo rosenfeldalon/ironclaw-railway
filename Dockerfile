@@ -15,7 +15,9 @@ RUN git clone --depth 1 --branch "${IRONCLAW_REF}" "${IRONCLAW_REPO}" /build/iro
 WORKDIR /build/ironclaw
 
 COPY patches/0001-wasm-workspace-reader.patch /tmp/0001-wasm-workspace-reader.patch
+COPY patches/0002-recipient-first-notification-routing.patch /tmp/0002-recipient-first-notification-routing.patch
 RUN git apply /tmp/0001-wasm-workspace-reader.patch
+RUN git apply /tmp/0002-recipient-first-notification-routing.patch
 
 RUN cargo build --release --bin ironclaw
 
