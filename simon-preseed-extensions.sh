@@ -54,14 +54,14 @@ install_bundle() {
   install -m 0644 "${unpack}/${name}.capabilities.json" "${target_dir}/${name}.capabilities.json"
 }
 
-CALENDAR_TAG="${SIMON_CALENDAR_EXTENSION_TAG:-ironclaw-simon-calendar-write-2026-05-05}"
+CALENDAR_TAG="${SIMON_CALENDAR_EXTENSION_TAG:-ironclaw-simon-telegram-owner-scope-2026-05-05-r2}"
 SUPPORT_TAG="${SIMON_SUPPORT_EXTENSION_TAG:-ironclaw-simon-install-pack-support-2026-05-05}"
 RAW_BASE="${SIMON_EXTENSION_RAW_BASE:-https://raw.githubusercontent.com/rosenfeldalon/simon-ironclaw-extensions}"
 
 install_bundle \
   simon_telegram_channel \
   wasm_channel \
-  "${RAW_BASE}/${CALENDAR_TAG}/bundles/simon_telegram_channel/1.14.tar.gz"
+  "${RAW_BASE}/${CALENDAR_TAG}/bundles/simon_telegram_channel/1.15.tar.gz"
 
 install_bundle \
   simon_google_calendar \
