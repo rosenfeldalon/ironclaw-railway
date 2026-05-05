@@ -1,21 +1,19 @@
-From 33f1e20c43d37da74277ef0eb71505449f50b2df Mon Sep 17 00:00:00 2001
-From: Alon Rosenfeld <rosenfeldalon@gmail.com>
-Date: Sun, 3 May 2026 12:00:00 +0300
-Subject: [PATCH] fix(routines): prefer bound channel targets over owner aliases
-
----
- src/agent/agent_loop.rs     | 34 +++++++++++++++++++++++++-----
- src/tools/builtin/message.rs | 52 +++++++++++++++++++++++++++++++++++++++++--
- 2 files changed, 78 insertions(+), 8 deletions(-)
-
 diff --git a/src/agent/agent_loop.rs b/src/agent/agent_loop.rs
-index 8d08cdfe..5a8b46dd 100644
+index 8d08cdfe..6d0769cb 100644
 --- a/src/agent/agent_loop.rs
 +++ b/src/agent/agent_loop.rs
-@@ -139,6 +139,19 @@ fn resolve_owner_scope_notification_user(
+@@ -26,6 +26,7 @@ use crate::context::ContextManager;
+ use crate::db::Database;
+ use crate::error::{ChannelError, Error};
+ use crate::extensions::ExtensionManager;
++use crate::extensions::manager::NotificationTargetResolution;
+ use crate::hooks::HookRegistry;
+ use crate::llm::LlmProvider;
+ use crate::tools::ToolRegistry;
+@@ -139,6 +140,19 @@ fn resolve_owner_scope_notification_user(
      trimmed_option(explicit_user).or_else(|| trimmed_option(owner_fallback))
  }
- 
+
 +fn prefers_channel_notification_target(
 +    explicit_user: Option<&str>,
 +    owner_fallback: Option<&str>,
@@ -32,49 +30,285 @@ index 8d08cdfe..5a8b46dd 100644
  fn is_single_message_repl(message: &IncomingMessage) -> bool {
      message.channel == "repl"
          && message
-@@ -154,8 +167,10 @@ async fn resolve_channel_notification_user(
+@@ -153,27 +167,44 @@ async fn resolve_channel_notification_user(
+     channel: Option<&str>,
      explicit_user: Option<&str>,
      owner_fallback: Option<&str>,
- ) -> Option<String> {
+-) -> Option<String> {
 -    if let Some(user) = trimmed_option(explicit_user) {
 -        return Some(user);
+-    }
++) -> NotificationTargetResolution {
 +    let explicit = trimmed_option(explicit_user);
+
+     if let Some(channel_name) = trimmed_option(channel)
+         && let Some(extension_manager) = extension_manager
+-        && let Some(target) = extension_manager
+-            .notification_target_for_channel(&channel_name)
+-            .await
+     {
+-        return Some(target);
++        let resolution = extension_manager
++            .resolve_notification_target(&channel_name, explicit.as_deref(), owner_fallback)
++            .await;
++        if resolution.target.is_some() {
++            return resolution;
++        }
++    }
 +
 +    if !prefers_channel_notification_target(explicit_user, owner_fallback) {
-+        return explicit;
++        return NotificationTargetResolution::new(
++            explicit.clone(),
++            crate::extensions::manager::NotificationTargetSource::ExplicitExternal,
++            explicit,
++            None,
++            false,
++        );
      }
- 
-     if let Some(channel_name) = trimmed_option(channel)
-@@ -167,7 +182,7 @@ async fn resolve_channel_notification_user(
-         return Some(target);
-     }
- 
+
 -    resolve_owner_scope_notification_user(explicit_user, owner_fallback)
-+    explicit.or_else(|| trimmed_option(owner_fallback))
++    let fallback = explicit.or_else(|| trimmed_option(owner_fallback));
++    NotificationTargetResolution::new(
++        fallback,
++        crate::extensions::manager::NotificationTargetSource::MissingTarget,
++        None,
++        None,
++        false,
++    )
  }
- 
+
  async fn resolve_routine_notification_target(
-@@ -2162,7 +2177,8 @@ impl Agent {
+     extension_manager: Option<&Arc<ExtensionManager>>,
+     metadata: &serde_json::Value,
+-) -> Option<String> {
++) -> NotificationTargetResolution {
+     resolve_channel_notification_user(
+         extension_manager,
+         metadata
+@@ -932,7 +963,9 @@ impl Agent {
+                             // Try the configured channel first, fall back to
+                             // broadcasting on all channels.
+                             let targeted_ok = if let Some(ref channel) = notify_channel {
+-                                let target = effective_user.as_deref().or(notify_target.as_deref());
++                                let target = effective_user
++                                    .as_deref()
++                                    .or(notify_target.target.as_deref());
+                                 if let Some(user) = target {
+                                     channels
+                                         .broadcast(channel, user, response.clone())
+@@ -1043,6 +1076,11 @@ impl Agent {
+                                 .get("notify_channel")
+                                 .and_then(|v| v.as_str())
+                                 .map(|s| s.to_string());
++                            let routine_name = response
++                                .metadata
++                                .get("routine_name")
++                                .and_then(|v| v.as_str())
++                                .map(|s| s.to_string());
+                             let fallback_user = resolve_owner_scope_notification_user(
+                                 response
+                                     .metadata
+@@ -1050,14 +1088,19 @@ impl Agent {
+                                     .and_then(|v| v.as_str()),
+                                 response.metadata.get("owner_id").and_then(|v| v.as_str()),
+                             );
+-                            let Some(user) = resolve_routine_notification_target(
++                            let resolution = resolve_routine_notification_target(
+                                 extension_manager.as_ref(),
+                                 &response.metadata,
+                             )
+-                            .await
+-                            else {
++                            .await;
++                            let Some(user) = resolution.target.clone() else {
+                                 tracing::warn!(
++                                    routine_name = ?routine_name,
+                                     notify_channel = ?notify_channel,
++                                    recipient_hint = ?resolution.recipient_hint,
++                                    routing_source = resolution.source.as_str(),
++                                    used_fallback = resolution.used_fallback,
++                                    send_attempted = false,
+                                     "Skipping routine notification with no explicit target or owner scope"
+                                 );
+                                 continue;
+@@ -1066,16 +1109,42 @@ impl Agent {
+                             // Try the configured channel first, fall back to
+                             // broadcasting on all channels.
+                             let targeted_ok = if let Some(ref channel) = notify_channel {
++                                tracing::info!(
++                                    routine_name = ?routine_name,
++                                    notify_channel = %channel,
++                                    recipient_hint = ?resolution.recipient_hint,
++                                    routing_source = resolution.source.as_str(),
++                                    used_fallback = resolution.used_fallback,
++                                    send_attempted = true,
++                                    "Attempting routine notification on configured channel"
++                                );
+                                 match channels.broadcast(channel, &user, response.clone()).await {
+-                                    Ok(()) => true,
++                                    Ok(()) => {
++                                        tracing::info!(
++                                            routine_name = ?routine_name,
++                                            notify_channel = %channel,
++                                            recipient_hint = ?resolution.recipient_hint,
++                                            routing_source = resolution.source.as_str(),
++                                            used_fallback = resolution.used_fallback,
++                                            send_attempted = true,
++                                            send_succeeded = true,
++                                            "Routine notification send succeeded"
++                                        );
++                                        true
++                                    }
+                                     Err(e) => {
+                                         let should_fallback =
+                                             should_fallback_routine_notification(&e);
+                                         tracing::warn!(
++                                            routine_name = ?routine_name,
+                                             channel = %channel,
+-                                            user = %user,
++                                            recipient_hint = ?resolution.recipient_hint,
++                                            routing_source = resolution.source.as_str(),
++                                            used_fallback = resolution.used_fallback,
+                                             error = %e,
+                                             should_fallback,
++                                            send_attempted = true,
++                                            send_succeeded = false,
+                                             "Failed to send routine notification to configured channel"
+                                         );
+                                         if !should_fallback {
+@@ -1085,6 +1154,15 @@ impl Agent {
+                                     }
+                                 }
+                             } else {
++                                tracing::info!(
++                                    routine_name = ?routine_name,
++                                    notify_channel = ?notify_channel,
++                                    recipient_hint = ?resolution.recipient_hint,
++                                    routing_source = resolution.source.as_str(),
++                                    used_fallback = resolution.used_fallback,
++                                    send_attempted = false,
++                                    "Routine notification has no configured channel; falling back to broadcast_all"
++                                );
+                                 false
+                             };
+
+@@ -2162,7 +2240,8 @@ impl Agent {
  #[cfg(test)]
  mod tests {
      use super::{
 -        chat_tool_execution_metadata, is_single_message_repl, resolve_routine_notification_user,
-+        chat_tool_execution_metadata, is_single_message_repl,
-+        prefers_channel_notification_target, resolve_routine_notification_user,
++        chat_tool_execution_metadata, is_single_message_repl, prefers_channel_notification_target,
++        resolve_routine_notification_target, resolve_routine_notification_user,
          should_fallback_routine_notification, truncate_for_preview,
      };
      use crate::agent::agent_loop::{Agent, AgentDeps, HandleOutcome};
-@@ -2384,6 +2400,20 @@ mod tests {
+@@ -2170,6 +2249,7 @@ mod tests {
+     use crate::agent::submission::{AuthGateResolution, Submission};
+     use crate::channels::IncomingMessage;
+     use crate::error::ChannelError;
++    use crate::extensions::ExtensionManager;
+     use crate::hooks::HookRegistry;
+     use crate::tools::ToolRegistry;
+     use crate::{
+@@ -2227,6 +2307,84 @@ mod tests {
+         }
+     }
+
++    #[cfg(feature = "libsql")]
++    async fn make_simon_extension_manager(
++        registry_json: &str,
++        owner_binding: Option<i64>,
++    ) -> Result<Arc<ExtensionManager>, String> {
++        use crate::db::{Database, SettingsStore};
++        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
++        use crate::testing::credentials::TEST_CRYPTO_KEY;
++        use crate::tools::ToolRegistry;
++        use crate::tools::builtin::memory::FixedWorkspaceResolver;
++        use crate::tools::mcp::process::McpProcessManager;
++        use crate::tools::mcp::session::McpSessionManager;
++        use crate::workspace::Workspace;
++
++        let dir = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
++        let root = dir.keep();
++        let db_path = root.join("agent-loop-simon.db");
++        let db = Arc::new(
++            crate::db::libsql::LibSqlBackend::new_local(&db_path)
++                .await
++                .map_err(|e| format!("create local libsql backend failed: {e}"))?,
++        );
++        db.run_migrations()
++            .await
++            .map_err(|e| format!("run libsql migrations failed: {e}"))?;
++
++        let db_for_workspace: Arc<dyn Database> = db.clone();
++        let workspace = Arc::new(Workspace::new_with_db(
++            "test",
++            Arc::clone(&db_for_workspace),
++        ));
++        workspace
++            .write(
++                "channels/simon_telegram_channel/state/simon_family_profiles.json",
++                registry_json,
++            )
++            .await
++            .map_err(|e| format!("write Simon family registry failed: {e}"))?;
++
++        if let Some(owner_id) = owner_binding {
++            db.set_setting(
++                "test",
++                "channels.wasm_channel_owner_ids.simon_telegram_channel",
++                &serde_json::json!(owner_id),
++            )
++            .await
++            .map_err(|e| format!("persist owner binding failed: {e}"))?;
++        }
++
++        let tools = Arc::new(ToolRegistry::new());
++        tools.register_memory_tools_with_resolver(
++            Arc::new(FixedWorkspaceResolver::new(Arc::clone(&workspace))),
++            None,
++            false,
++        );
++
++        let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
++        let crypto = Arc::new(
++            SecretsCrypto::new(master_key)
++                .map_err(|e| format!("create secrets crypto failed: {e}"))?,
++        );
++
++        Ok(Arc::new(ExtensionManager::new(
++            Arc::new(McpSessionManager::new()),
++            Arc::new(McpProcessManager::new()),
++            Arc::new(InMemorySecretsStore::new(crypto)),
++            tools,
++            None,
++            None,
++            root.join("tools"),
++            root.join("channels"),
++            None,
++            "test".to_string(),
++            Some(db_for_workspace),
++            Vec::new(),
++        )))
++    }
++
+     fn make_legacy_handle_message_test_agent() -> Agent {
+         let deps = AgentDeps {
+             owner_id: "default".to_string(),
+@@ -2384,6 +2542,58 @@ mod tests {
          assert_eq!(resolve_routine_notification_user(&metadata), None); // safety: test-only assertion
      }
- 
+
 +    #[test]
 +    fn prefers_channel_notification_target_for_owner_scope_alias() {
 +        assert!(prefers_channel_notification_target(
 +            Some("owner-scope"),
 +            Some("owner-scope")
 +        ));
-+        assert!(prefers_channel_notification_target(None, Some("owner-scope")));
++        assert!(prefers_channel_notification_target(
++            None,
++            Some("owner-scope")
++        ));
 +        assert!(!prefers_channel_notification_target(
 +            Some("12345"),
 +            Some("owner-scope")
@@ -82,23 +316,610 @@ index 8d08cdfe..5a8b46dd 100644
 +        assert!(!prefers_channel_notification_target(Some("12345"), None));
 +    }
 +
++    #[cfg(feature = "libsql")]
++    #[tokio::test]
++    async fn resolve_routine_notification_target_uses_simon_registry_recipient_binding()
++    -> Result<(), String> {
++        let registry = serde_json::json!({
++            "users": [
++                {
++                    "canonicalId": "alon",
++                    "channelBindings": [
++                        {
++                            "channel": "simon_telegram_channel",
++                            "target": "424242"
++                        }
++                    ]
++                }
++            ]
++        })
++        .to_string();
++        let extension_manager = make_simon_extension_manager(&registry, Some(999999)).await?;
++        let metadata = serde_json::json!({
++            "notify_channel": "simon_telegram_channel",
++            "notify_user": "alon",
++            "owner_id": "owner-scope",
++        });
++
++        let resolved =
++            resolve_routine_notification_target(Some(&extension_manager), &metadata).await;
++
++        assert_eq!(resolved.target.as_deref(), Some("424242"));
++        assert_eq!(resolved.source.as_str(), "simon_registry");
++        assert_eq!(resolved.canonical_recipient.as_deref(), Some("alon"));
++        assert!(!resolved.used_fallback);
++        Ok(())
++    }
++
      #[test]
      fn chat_tool_execution_metadata_prefers_message_routing_target() {
          let message = IncomingMessage::new("telegram", "owner-scope", "hello")
+diff --git a/src/extensions/manager.rs b/src/extensions/manager.rs
+index 14df7552..300b18f5 100644
+--- a/src/extensions/manager.rs
++++ b/src/extensions/manager.rs
+@@ -203,6 +203,87 @@ struct TelegramApiOkResponse {
+ #[cfg(any(test, debug_assertions))]
+ const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
+ const TELEGRAM_DEFAULT_API_BASE: &str = "https://api.telegram.org";
++const SIMON_TELEGRAM_CHANNEL_NAME: &str = "simon_telegram_channel";
++const SIMON_FAMILY_REGISTRY_PATH: &str =
++    "channels/simon_telegram_channel/state/simon_family_profiles.json";
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum NotificationTargetSource {
++    SimonRegistry,
++    OwnerBinding,
++    PairingStore,
++    ExplicitExternal,
++    MissingTarget,
++}
++
++impl NotificationTargetSource {
++    pub(crate) fn as_str(self) -> &'static str {
++        match self {
++            Self::SimonRegistry => "simon_registry",
++            Self::OwnerBinding => "owner_binding",
++            Self::PairingStore => "pairing_store",
++            Self::ExplicitExternal => "explicit_external",
++            Self::MissingTarget => "missing_target",
++        }
++    }
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct NotificationTargetResolution {
++    pub(crate) target: Option<String>,
++    pub(crate) source: NotificationTargetSource,
++    pub(crate) recipient_hint: Option<String>,
++    pub(crate) canonical_recipient: Option<String>,
++    pub(crate) used_fallback: bool,
++}
++
++impl NotificationTargetResolution {
++    pub(crate) fn new(
++        target: Option<String>,
++        source: NotificationTargetSource,
++        recipient_hint: Option<String>,
++        canonical_recipient: Option<String>,
++        used_fallback: bool,
++    ) -> Self {
++        Self {
++            target,
++            source,
++            recipient_hint,
++            canonical_recipient,
++            used_fallback,
++        }
++    }
++
++    fn missing(recipient_hint: Option<String>) -> Self {
++        Self::new(
++            None,
++            NotificationTargetSource::MissingTarget,
++            recipient_hint,
++            None,
++            false,
++        )
++    }
++}
++
++#[derive(Debug, serde::Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct SimonFamilyRegistry {
++    users: Vec<SimonFamilyRegistryUser>,
++}
++
++#[derive(Debug, serde::Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct SimonFamilyRegistryUser {
++    canonical_id: String,
++    channel_bindings: Vec<SimonChannelBinding>,
++}
++
++#[derive(Debug, serde::Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct SimonChannelBinding {
++    channel: String,
++    target: Option<String>,
++}
+
+ #[cfg(any(test, debug_assertions))]
+ fn telegram_api_base_url() -> String {
+@@ -221,6 +302,38 @@ fn telegram_bot_api_url(bot_token: &str, method: &str) -> String {
+     format!("{}/bot{bot_token}/{method}", telegram_api_base_url())
+ }
+
++fn trimmed_string(value: Option<&str>) -> Option<String> {
++    value
++        .map(str::trim)
++        .filter(|value| !value.is_empty())
++        .map(ToOwned::to_owned)
++}
++
++fn normalize_simon_identity(value: &str) -> Option<String> {
++    let trimmed = value.trim().to_ascii_lowercase();
++    if trimmed.is_empty() {
++        return None;
++    }
++
++    if trimmed
++        .chars()
++        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
++    {
++        Some(trimmed)
++    } else {
++        None
++    }
++}
++
++fn looks_like_explicit_telegram_target(value: &str) -> bool {
++    let trimmed = value.trim();
++    !trimmed.is_empty()
++        && (trimmed.starts_with('@')
++            || trimmed
++                .chars()
++                .all(|ch| ch.is_ascii_digit() || ch == '-' || ch == '+'))
++}
++
+ fn is_valid_telegram_bot_token(bot_token: &str) -> bool {
+     let Some((bot_id, secret)) = bot_token.split_once(':') else {
+         return false;
+@@ -903,14 +1016,26 @@ impl ExtensionManager {
+         }
+     }
+
+-    async fn current_channel_owner_actor_id(&self, name: &str) -> Option<String> {
++    async fn current_channel_owner_actor_resolution(
++        &self,
++        name: &str,
++    ) -> NotificationTargetResolution {
+         if let Some(owner_id) = self.current_channel_owner_id(name).await {
+-            return Some(owner_id.to_string());
++            return NotificationTargetResolution::new(
++                Some(owner_id.to_string()),
++                NotificationTargetSource::OwnerBinding,
++                None,
++                None,
++                true,
++            );
+         }
+
+         let rt_guard = self.channel_runtime.read().await;
+-        let rt = (*rt_guard).as_ref()?;
+-        rt.pairing_store
++        let Some(rt) = (*rt_guard).as_ref() else {
++            return NotificationTargetResolution::missing(None);
++        };
++        let paired = rt
++            .pairing_store
+             .external_id_for_owner(
+                 name,
+                 &crate::ownership::UserId::from_trusted(
+@@ -920,7 +1045,78 @@ impl ExtensionManager {
+             )
+             .await
+             .ok()
+-            .flatten()
++            .flatten();
++
++        match paired {
++            Some(target) => NotificationTargetResolution::new(
++                Some(target),
++                NotificationTargetSource::PairingStore,
++                None,
++                None,
++                true,
++            ),
++            None => NotificationTargetResolution::missing(None),
++        }
++    }
++
++    async fn current_channel_owner_actor_id(&self, name: &str) -> Option<String> {
++        self.current_channel_owner_actor_resolution(name)
++            .await
++            .target
++    }
++
++    async fn load_simon_family_registry(&self) -> Option<SimonFamilyRegistry> {
++        let resolver = self.tool_registry.workspace_resolver()?;
++        let workspace = resolver.resolve(&self.user_id).await;
++        let raw = match workspace.read(SIMON_FAMILY_REGISTRY_PATH).await {
++            Ok(doc) => doc.content,
++            Err(error) => {
++                tracing::debug!(
++                    path = SIMON_FAMILY_REGISTRY_PATH,
++                    error = %error,
++                    "Failed to read Simon family registry for notification routing"
++                );
++                return None;
++            }
++        };
++
++        match serde_json::from_str::<SimonFamilyRegistry>(raw.trim()) {
++            Ok(registry) => Some(registry),
++            Err(error) => {
++                tracing::warn!(
++                    path = SIMON_FAMILY_REGISTRY_PATH,
++                    error = %error,
++                    "Failed to parse Simon family registry for notification routing"
++                );
++                None
++            }
++        }
++    }
++
++    async fn resolve_simon_registry_target(
++        &self,
++        channel: &str,
++        recipient_hint: &str,
++    ) -> Option<NotificationTargetResolution> {
++        let canonical_recipient = normalize_simon_identity(recipient_hint)?;
++        let registry = self.load_simon_family_registry().await?;
++        let user = registry
++            .users
++            .iter()
++            .find(|user| user.canonical_id == canonical_recipient)?;
++        let binding = user
++            .channel_bindings
++            .iter()
++            .find(|binding| binding.channel == channel)?;
++        let target = trimmed_string(binding.target.as_deref())?;
++
++        Some(NotificationTargetResolution::new(
++            Some(target),
++            NotificationTargetSource::SimonRegistry,
++            Some(recipient_hint.trim().to_string()),
++            Some(user.canonical_id.clone()),
++            false,
++        ))
+     }
+
+     async fn load_channel_runtime_config_overrides(
+@@ -946,7 +1142,10 @@ impl ExtensionManager {
+     }
+
+     pub async fn has_wasm_channel_owner_binding(&self, name: &str) -> bool {
+-        self.current_channel_owner_actor_id(name).await.is_some()
++        self.current_channel_owner_actor_resolution(name)
++            .await
++            .target
++            .is_some()
+     }
+
+     async fn channel_activation_lock(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
+@@ -1048,8 +1247,61 @@ impl ExtensionManager {
+         }
+     }
+
++    pub(crate) async fn resolve_notification_target(
++        &self,
++        name: &str,
++        recipient_hint: Option<&str>,
++        owner_scope_hint: Option<&str>,
++    ) -> NotificationTargetResolution {
++        let recipient_hint = trimmed_string(recipient_hint);
++        let owner_scope_hint = trimmed_string(owner_scope_hint);
++        let normalized_channel = name.trim().to_ascii_lowercase();
++        let explicit_hint = recipient_hint
++            .clone()
++            .filter(|hint| owner_scope_hint.as_ref() != Some(hint));
++
++        if normalized_channel == SIMON_TELEGRAM_CHANNEL_NAME {
++            if let Some(ref hint) = recipient_hint
++                && let Some(resolution) = self.resolve_simon_registry_target(name, hint).await
++            {
++                return resolution;
++            }
++
++            if let Some(explicit) = explicit_hint.clone()
++                && looks_like_explicit_telegram_target(&explicit)
++            {
++                return NotificationTargetResolution::new(
++                    Some(explicit.clone()),
++                    NotificationTargetSource::ExplicitExternal,
++                    Some(explicit),
++                    None,
++                    false,
++                );
++            }
++        } else if let Some(explicit) = explicit_hint.clone() {
++            return NotificationTargetResolution::new(
++                Some(explicit.clone()),
++                NotificationTargetSource::ExplicitExternal,
++                Some(explicit),
++                None,
++                false,
++            );
++        }
++
++        let mut fallback = self.current_channel_owner_actor_resolution(name).await;
++        if fallback.target.is_some() {
++            fallback.recipient_hint = recipient_hint.clone();
++            fallback.used_fallback = true;
++            return fallback;
++        }
++
++        NotificationTargetResolution::missing(recipient_hint)
++    }
++
+     pub(crate) async fn notification_target_for_channel(&self, name: &str) -> Option<String> {
+-        self.current_channel_owner_actor_id(name).await
++        self.resolve_notification_target(name, None, None)
++            .await
++            .target
+     }
+
+     /// Set just the channel manager for relay channel hot-activation.
+@@ -9901,6 +10153,84 @@ mod tests {
+         )
+     }
+
++    #[cfg(feature = "libsql")]
++    async fn make_manager_with_simon_registry(
++        registry_json: &str,
++        owner_bindings: &[(&str, i64)],
++    ) -> Result<ExtensionManager, String> {
++        use crate::db::{Database, SettingsStore};
++        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
++        use crate::testing::credentials::TEST_CRYPTO_KEY;
++        use crate::tools::ToolRegistry;
++        use crate::tools::builtin::memory::FixedWorkspaceResolver;
++        use crate::tools::mcp::process::McpProcessManager;
++        use crate::tools::mcp::session::McpSessionManager;
++        use crate::workspace::Workspace;
++
++        let dir = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
++        let root = dir.keep();
++        let db_path = root.join("extension-manager-simon.db");
++        let db = Arc::new(
++            crate::db::libsql::LibSqlBackend::new_local(&db_path)
++                .await
++                .map_err(|e| format!("create local libsql backend failed: {e}"))?,
++        );
++        db.run_migrations()
++            .await
++            .map_err(|e| format!("run libsql migrations failed: {e}"))?;
++
++        let db_for_workspace: Arc<dyn Database> = db.clone();
++        let workspace = Arc::new(Workspace::new_with_db(
++            "test",
++            Arc::clone(&db_for_workspace),
++        ));
++        workspace
++            .write(
++                "channels/simon_telegram_channel/state/simon_family_profiles.json",
++                registry_json,
++            )
++            .await
++            .map_err(|e| format!("write Simon family registry failed: {e}"))?;
++
++        for (channel, owner_id) in owner_bindings {
++            db.set_setting(
++                "test",
++                &format!("channels.wasm_channel_owner_ids.{channel}"),
++                &serde_json::json!(owner_id),
++            )
++            .await
++            .map_err(|e| format!("persist owner binding failed: {e}"))?;
++        }
++
++        let tools = Arc::new(ToolRegistry::new());
++        tools.register_memory_tools_with_resolver(
++            Arc::new(FixedWorkspaceResolver::new(Arc::clone(&workspace))),
++            None,
++            false,
++        );
++
++        let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
++        let crypto = Arc::new(
++            SecretsCrypto::new(master_key)
++                .map_err(|e| format!("create secrets crypto failed: {e}"))?,
++        );
++
++        Ok(ExtensionManager::new(
++            Arc::new(McpSessionManager::new()),
++            Arc::new(McpProcessManager::new()),
++            Arc::new(InMemorySecretsStore::new(crypto)),
++            tools,
++            None,
++            None,
++            root.join("tools"),
++            root.join("channels"),
++            None,
++            "test".to_string(),
++            Some(db_for_workspace),
++            Vec::new(),
++        ))
++    }
++
+     fn make_test_loaded_channel(
+         runtime: Arc<WasmChannelRuntime>,
+         name: &str,
+@@ -10089,6 +10419,139 @@ mod tests {
+         Ok(())
+     }
+
++    #[cfg(feature = "libsql")]
++    #[tokio::test]
++    async fn test_resolve_notification_target_prefers_simon_registry_binding() -> Result<(), String>
++    {
++        let registry = serde_json::json!({
++            "users": [
++                {
++                    "canonicalId": "alon",
++                    "channelBindings": [
++                        {
++                            "channel": "simon_telegram_channel",
++                            "target": "424242"
++                        }
++                    ]
++                }
++            ]
++        })
++        .to_string();
++        let manager =
++            make_manager_with_simon_registry(&registry, &[("simon_telegram_channel", 999999)])
++                .await?;
++
++        let resolved = manager
++            .resolve_notification_target(
++                "simon_telegram_channel",
++                Some("alon"),
++                Some("owner-scope"),
++            )
++            .await;
++
++        require_eq(
++            resolved.target,
++            Some("424242".to_string()),
++            "Simon registry delivery target",
++        )?;
++        require_eq(
++            resolved.source.as_str(),
++            "simon_registry",
++            "Simon registry routing source",
++        )?;
++        require_eq(
++            resolved.canonical_recipient,
++            Some("alon".to_string()),
++            "canonical recipient",
++        )?;
++        require(
++            !resolved.used_fallback,
++            "registry path should not use fallback",
++        )?;
++        Ok(())
++    }
++
++    #[cfg(feature = "libsql")]
++    #[tokio::test]
++    async fn test_resolve_notification_target_falls_back_for_unknown_simon_recipient()
++    -> Result<(), String> {
++        let registry = serde_json::json!({
++            "users": [
++                {
++                    "canonicalId": "alon",
++                    "channelBindings": [
++                        {
++                            "channel": "simon_telegram_channel",
++                            "target": "424242"
++                        }
++                    ]
++                }
++            ]
++        })
++        .to_string();
++        let manager =
++            make_manager_with_simon_registry(&registry, &[("simon_telegram_channel", 999999)])
++                .await?;
++
++        let resolved = manager
++            .resolve_notification_target(
++                "simon_telegram_channel",
++                Some("not-a-canonical-user"),
++                Some("owner-scope"),
++            )
++            .await;
++
++        require_eq(
++            resolved.target,
++            Some("999999".to_string()),
++            "fallback owner-bound delivery target",
++        )?;
++        require_eq(
++            resolved.source.as_str(),
++            "owner_binding",
++            "fallback routing source",
++        )?;
++        require(resolved.used_fallback, "fallback should be marked as used")?;
++        Ok(())
++    }
++
++    #[cfg(feature = "libsql")]
++    #[tokio::test]
++    async fn test_resolve_notification_target_keeps_non_simon_channels_generic()
++    -> Result<(), String> {
++        let registry = serde_json::json!({
++            "users": [
++                {
++                    "canonicalId": "alon",
++                    "channelBindings": [
++                        {
++                            "channel": "simon_telegram_channel",
++                            "target": "424242"
++                        }
++                    ]
++                }
++            ]
++        })
++        .to_string();
++        let manager = make_manager_with_simon_registry(&registry, &[("telegram", 54321)]).await?;
++
++        let resolved = manager
++            .resolve_notification_target("telegram", Some("owner-scope"), Some("owner-scope"))
++            .await;
++
++        require_eq(
++            resolved.target,
++            Some("54321".to_string()),
++            "generic telegram owner-bound target",
++        )?;
++        require_eq(
++            resolved.source.as_str(),
++            "owner_binding",
++            "generic telegram routing source",
++        )?;
++        Ok(())
++    }
++
+     #[cfg(feature = "libsql")]
+     #[tokio::test]
+     async fn test_current_channel_owner_id_uses_store_fallback() -> Result<(), String> {
 diff --git a/src/tools/builtin/message.rs b/src/tools/builtin/message.rs
-index 691d9026..375fb6c0 100644
+index 691d9026..2dd82f9e 100644
 --- a/src/tools/builtin/message.rs
 +++ b/src/tools/builtin/message.rs
-@@ -86,6 +86,22 @@ fn metadata_owner_id(metadata: &serde_json::Value) -> Option<String> {
+@@ -11,6 +11,7 @@ use crate::bootstrap::ironclaw_base_dir;
+ use crate::channels::{ChannelManager, OutgoingResponse};
+ use crate::context::JobContext;
+ use crate::extensions::ExtensionManager;
++use crate::extensions::manager::{NotificationTargetResolution, NotificationTargetSource};
+ use crate::tools::tool::{
+     ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str,
+ };
+@@ -86,6 +87,24 @@ fn metadata_owner_id(metadata: &serde_json::Value) -> Option<String> {
      metadata_string(metadata, "owner_id")
  }
- 
+
 +fn prefers_channel_notification_target(
 +    explicit_target: Option<&str>,
 +    owner_scope_target: Option<&str>,
 +) -> bool {
 +    match (
-+        explicit_target.map(str::trim).filter(|value| !value.is_empty()),
++        explicit_target
++            .map(str::trim)
++            .filter(|value| !value.is_empty()),
 +        owner_scope_target
 +            .map(str::trim)
 +            .filter(|value| !value.is_empty()),
@@ -112,28 +933,343 @@ index 691d9026..375fb6c0 100644
  fn channel_matches_source(resolved_channel: Option<&str>, source_channel: Option<&str>) -> bool {
      match (resolved_channel, source_channel) {
          (None, _) => true,
-@@ -139,6 +155,10 @@ async fn resolve_message_target(inputs: MessageTargetResolution<'_>) -> Option<S
- 
+@@ -99,24 +118,31 @@ async fn resolve_channel_fallback_target(
+     channel: Option<&str>,
+     owner_scope_target: Option<&str>,
+     ctx_user_id: &str,
+-) -> Option<String> {
++) -> Option<ResolvedMessageTarget> {
+     // Prefer an explicit channel binding when the extension manager knows the
+     // durable delivery target (for example, a bound Telegram chat ID).
+     if let Some(channel_name) = channel
+         && let Some(extension_manager) = extension_manager
+-        && let Some(target) = extension_manager
+-            .notification_target_for_channel(channel_name)
+-            .await
+     {
+-        return Some(target);
++        let resolution = extension_manager
++            .resolve_notification_target(channel_name, None, owner_scope_target)
++            .await;
++        if let Some(resolved) = ResolvedMessageTarget::from_resolution(resolution) {
++            return Some(resolved);
++        }
+     }
+
+     // `owner_id` is only present for autonomous owner-scoped executions.
+     // Interactive chat turns intentionally fall back to `ctx.user_id`, which is
+     // already the active conversation target for the current channel.
+-    owner_scope_target
+-        .map(ToOwned::to_owned)
+-        .or_else(|| Some(ctx_user_id.to_string()))
++    Some(ResolvedMessageTarget {
++        target: owner_scope_target
++            .map(ToOwned::to_owned)
++            .unwrap_or_else(|| ctx_user_id.to_string()),
++        source: None,
++        recipient_hint: None,
++        used_fallback: owner_scope_target.is_some(),
++    })
+ }
+
+ struct MessageTargetResolution<'a> {
+@@ -132,16 +158,85 @@ struct MessageTargetResolution<'a> {
+     ctx_user_id: &'a str,
+ }
+
+-async fn resolve_message_target(inputs: MessageTargetResolution<'_>) -> Option<String> {
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct ResolvedMessageTarget {
++    target: String,
++    source: Option<NotificationTargetSource>,
++    recipient_hint: Option<String>,
++    used_fallback: bool,
++}
++
++impl ResolvedMessageTarget {
++    fn explicit(target: String) -> Self {
++        Self {
++            target,
++            source: Some(NotificationTargetSource::ExplicitExternal),
++            recipient_hint: None,
++            used_fallback: false,
++        }
++    }
++
++    fn from_resolution(resolution: NotificationTargetResolution) -> Option<Self> {
++        resolution.target.map(|target| Self {
++            target,
++            source: Some(resolution.source),
++            recipient_hint: resolution.recipient_hint,
++            used_fallback: resolution.used_fallback,
++        })
++    }
++
++    fn source_name(&self) -> &'static str {
++        self.source
++            .map(NotificationTargetSource::as_str)
++            .unwrap_or("context_default")
++    }
++}
++
++async fn resolve_message_target(
++    inputs: MessageTargetResolution<'_>,
++) -> Option<ResolvedMessageTarget> {
+     if let Some(target) = inputs.explicit_target {
+-        return Some(target);
++        if let Some(channel_name) = inputs.channel
++            && let Some(extension_manager) = inputs.extension_manager
++        {
++            let resolution = extension_manager
++                .resolve_notification_target(
++                    channel_name,
++                    Some(&target),
++                    inputs.owner_scope_target.as_deref(),
++                )
++                .await;
++            if let Some(resolved) = ResolvedMessageTarget::from_resolution(resolution) {
++                return Some(resolved);
++            }
++        }
++        return Some(ResolvedMessageTarget::explicit(target));
+     }
+
      if inputs.has_execution_routing_metadata {
-         if channel_matches_source(inputs.channel, inputs.metadata_channel)
-+            && !prefers_channel_notification_target(
+-        if channel_matches_source(inputs.channel, inputs.metadata_channel)
+-            && let Some(target) = inputs.metadata_target
+-        {
+-            return Some(target);
++        if channel_matches_source(inputs.channel, inputs.metadata_channel) {
++            if let Some(channel_name) = inputs.channel
++                && let Some(extension_manager) = inputs.extension_manager
++            {
++                let resolution = extension_manager
++                    .resolve_notification_target(
++                        channel_name,
++                        inputs.metadata_target.as_deref(),
++                        inputs.owner_scope_target.as_deref(),
++                    )
++                    .await;
++                if let Some(resolved) = ResolvedMessageTarget::from_resolution(resolution) {
++                    return Some(resolved);
++                }
++            }
++
++            if !prefers_channel_notification_target(
 +                inputs.metadata_target.as_deref(),
 +                inputs.owner_scope_target.as_deref(),
++            ) && let Some(target) = inputs.metadata_target
++            {
++                return Some(ResolvedMessageTarget::explicit(target));
++            }
+         }
+
+         return resolve_channel_fallback_target(
+@@ -156,7 +251,7 @@ async fn resolve_message_target(inputs: MessageTargetResolution<'_>) -> Option<S
+     if channel_matches_source(inputs.channel, inputs.default_channel)
+         && let Some(target) = inputs.default_target
+     {
+-        return Some(target);
++        return Some(ResolvedMessageTarget::explicit(target));
+     }
+
+     if inputs.channel.is_some() {
+@@ -275,7 +370,7 @@ impl Tool for MessageTool {
+
+         // Prefer explicit params, then execution-local routing metadata. Shared
+         // conversation defaults are only consulted when no job metadata exists.
+-        let target = resolve_message_target(MessageTargetResolution {
++        let resolved_target = resolve_message_target(MessageTargetResolution {
+             extension_manager: self.extension_manager.as_ref(),
+             explicit_target,
+             metadata_target,
+@@ -289,12 +384,13 @@ impl Tool for MessageTool {
+         })
+         .await;
+
+-        let Some(target) = target else {
++        let Some(resolved_target) = resolved_target else {
+             return Err(ToolError::ExecutionFailed(
+                 "No target specified and no channel-scoped routing target could be resolved. Provide target parameter."
+                     .to_string(),
+             ));
+         };
++        let target = resolved_target.target.clone();
+
+         let attachments: Vec<String> = match params.get("attachments") {
+             Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+@@ -354,24 +450,26 @@ impl Tool for MessageTool {
+                     tracing::info!(
+                         message_sent = true,
+                         channel = %channel,
+-                        target = %target,
++                        routing_source = resolved_target.source_name(),
++                        recipient_hint = ?resolved_target.recipient_hint,
++                        used_fallback = resolved_target.used_fallback,
+                         attachments = attachment_count,
+                         "Message sent via message tool"
+                     );
+-                    let msg = format!("Sent message to {}:{}", channel, target);
++                    let msg = format!("Sent message to {}", channel);
+                     Ok(ToolOutput::text(msg, start.elapsed()))
+                 }
+                 Err(e) => {
+                     let available = self.channel_manager.channel_names().await.join(", ");
+                     let err_msg = if available.is_empty() {
+                         format!(
+-                            "Failed to send to {}:{}: {}. No channels connected.",
+-                            channel, target, e
++                            "Failed to send to {}: {}. No channels connected.",
++                            channel, e
+                         )
+                     } else {
+                         format!(
+-                            "Failed to send to {}:{}. Available channels: {}. Error: {}",
+-                            channel, target, available, e
++                            "Failed to send to {}. Available channels: {}. Error: {}",
++                            channel, available, e
+                         )
+                     };
+                     Err(ToolError::ExecutionFailed(err_msg))
+@@ -388,7 +486,9 @@ impl Tool for MessageTool {
+                     Err(e) => {
+                         tracing::warn!(
+                             channel = %ch,
+-                            target = %target,
++                            routing_source = resolved_target.source_name(),
++                            recipient_hint = ?resolved_target.recipient_hint,
++                            used_fallback = resolved_target.used_fallback,
+                             "broadcast_all: channel failed: {}", e
+                         );
+                         failed.push(ch.as_str());
+@@ -406,15 +506,13 @@ impl Tool for MessageTool {
+                 tracing::info!(
+                     message_sent = true,
+                     channels = ?succeeded,
+-                    target = %target,
++                    routing_source = resolved_target.source_name(),
++                    recipient_hint = ?resolved_target.recipient_hint,
++                    used_fallback = resolved_target.used_fallback,
+                     attachments = attachment_count,
+                     "Message broadcast via message tool"
+                 );
+-                let msg = format!(
+-                    "Broadcast message to {} (target: {})",
+-                    succeeded.join(", "),
+-                    target
+-                );
++                let msg = format!("Broadcast message to {}", succeeded.join(", "));
+                 Ok(ToolOutput::text(msg, start.elapsed()))
+             }
+         }
+@@ -439,6 +537,8 @@ impl Tool for MessageTool {
+ mod tests {
+     use super::*;
+     use crate::testing::{BroadcastCapture, RecordingBroadcastChannel};
++    #[cfg(feature = "libsql")]
++    use std::sync::Arc;
+
+     async fn message_tool_with_recording_channels()
+     -> (MessageTool, BroadcastCapture, BroadcastCapture) {
+@@ -455,6 +555,84 @@ mod tests {
+         )
+     }
+
++    #[cfg(feature = "libsql")]
++    async fn make_simon_extension_manager(
++        registry_json: &str,
++        owner_binding: Option<i64>,
++    ) -> Result<Arc<ExtensionManager>, String> {
++        use crate::db::{Database, SettingsStore};
++        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
++        use crate::testing::credentials::TEST_CRYPTO_KEY;
++        use crate::tools::ToolRegistry;
++        use crate::tools::builtin::memory::FixedWorkspaceResolver;
++        use crate::tools::mcp::process::McpProcessManager;
++        use crate::tools::mcp::session::McpSessionManager;
++        use crate::workspace::Workspace;
++
++        let dir = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
++        let root = dir.keep();
++        let db_path = root.join("message-tool-simon.db");
++        let db = Arc::new(
++            crate::db::libsql::LibSqlBackend::new_local(&db_path)
++                .await
++                .map_err(|e| format!("create local libsql backend failed: {e}"))?,
++        );
++        db.run_migrations()
++            .await
++            .map_err(|e| format!("run libsql migrations failed: {e}"))?;
++
++        let db_for_workspace: Arc<dyn Database> = db.clone();
++        let workspace = Arc::new(Workspace::new_with_db(
++            "test",
++            Arc::clone(&db_for_workspace),
++        ));
++        workspace
++            .write(
++                "channels/simon_telegram_channel/state/simon_family_profiles.json",
++                registry_json,
 +            )
-             && let Some(target) = inputs.metadata_target
-         {
-             return Some(target);
-@@ -497,6 +517,20 @@ mod tests {
++            .await
++            .map_err(|e| format!("write Simon family registry failed: {e}"))?;
++
++        if let Some(owner_id) = owner_binding {
++            db.set_setting(
++                "test",
++                "channels.wasm_channel_owner_ids.simon_telegram_channel",
++                &serde_json::json!(owner_id),
++            )
++            .await
++            .map_err(|e| format!("persist owner binding failed: {e}"))?;
++        }
++
++        let tools = Arc::new(ToolRegistry::new());
++        tools.register_memory_tools_with_resolver(
++            Arc::new(FixedWorkspaceResolver::new(Arc::clone(&workspace))),
++            None,
++            false,
++        );
++
++        let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
++        let crypto = Arc::new(
++            SecretsCrypto::new(master_key)
++                .map_err(|e| format!("create secrets crypto failed: {e}"))?,
++        );
++
++        Ok(Arc::new(ExtensionManager::new(
++            Arc::new(McpSessionManager::new()),
++            Arc::new(McpProcessManager::new()),
++            Arc::new(InMemorySecretsStore::new(crypto)),
++            tools,
++            None,
++            None,
++            root.join("tools"),
++            root.join("channels"),
++            None,
++            "test".to_string(),
++            Some(db_for_workspace),
++            Vec::new(),
++        )))
++    }
++
+     #[test]
+     fn message_tool_name() {
+         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+@@ -497,6 +675,23 @@ mod tests {
          assert!(params.get("attachments").is_some());
      }
- 
+
 +    #[test]
 +    fn prefers_channel_notification_target_for_owner_scope_alias() {
 +        assert!(prefers_channel_notification_target(
 +            Some("owner-scope"),
 +            Some("owner-scope")
 +        ));
-+        assert!(prefers_channel_notification_target(None, Some("owner-scope")));
++        assert!(prefers_channel_notification_target(
++            None,
++            Some("owner-scope")
++        ));
 +        assert!(!prefers_channel_notification_target(
 +            Some("424242"),
 +            Some("owner-scope")
@@ -144,10 +1280,22 @@ index 691d9026..375fb6c0 100644
      /// Regression: LLMs frequently pass {"message": "..."} instead of
      /// {"content": "..."}. The tool should accept both.
      #[tokio::test]
-@@ -889,6 +923,44 @@ mod tests {
+@@ -878,10 +1073,7 @@ mod tests {
+             .await
+             .expect("message tool should use owner scope before ctx.user_id");
+
+-        assert_eq!(
+-            result.result.as_str(),
+-            Some("Sent message to telegram:owner-scope")
+-        );
++        assert_eq!(result.result.as_str(), Some("Sent message to telegram"));
+         assert!(gateway_captures.lock().await.is_empty());
+         let telegram = telegram_captures.lock().await.clone();
+         assert_eq!(telegram.len(), 1);
+@@ -889,6 +1081,54 @@ mod tests {
          assert_eq!(telegram[0].1.content, "NEAR price is $5");
      }
- 
+
 +    #[tokio::test]
 +    async fn message_tool_treats_owner_scope_metadata_as_channel_binding_fallback() {
 +        let target = resolve_message_target(MessageTargetResolution {
@@ -164,7 +1312,10 @@ index 691d9026..375fb6c0 100644
 +        })
 +        .await;
 +
-+        assert_eq!(target.as_deref(), Some("owner-scope"));
++        assert_eq!(
++            target.as_ref().map(|value| value.target.as_str()),
++            Some("owner-scope")
++        );
 +    }
 +
 +    #[tokio::test]
@@ -183,11 +1334,159 @@ index 691d9026..375fb6c0 100644
 +        })
 +        .await;
 +
-+        assert_eq!(target.as_deref(), Some("424242"));
++        assert_eq!(
++            target.as_ref().map(|value| value.target.as_str()),
++            Some("424242")
++        );
++        assert_eq!(
++            target.as_ref().map(|value| value.source_name()),
++            Some("explicit_external")
++        );
 +    }
 +
      #[tokio::test]
      async fn message_tool_falls_back_to_ctx_user_when_owner_scope_absent() {
          let (tool, gateway_captures, telegram_captures) =
--- 
-2.53.0
+@@ -910,10 +1150,7 @@ mod tests {
+                 "message tool should fall back to ctx.user_id when owner scope metadata is absent",
+             );
+
+-        assert_eq!(
+-            result.result.as_str(),
+-            Some("Sent message to telegram:interactive-chat-user")
+-        );
++        assert_eq!(result.result.as_str(), Some("Sent message to telegram"));
+         assert!(gateway_captures.lock().await.is_empty());
+         let telegram = telegram_captures.lock().await.clone();
+         assert_eq!(telegram.len(), 1);
+@@ -993,10 +1230,7 @@ mod tests {
+             .execute(serde_json::json!({"content": "hello"}), &ctx)
+             .await
+             .expect("message tool should use telegram metadata routing");
+-        assert_eq!(
+-            result.result.as_str(),
+-            Some("Sent message to telegram:424242")
+-        );
++        assert_eq!(result.result.as_str(), Some("Sent message to telegram"));
+
+         assert!(gateway_captures.lock().await.is_empty());
+         let telegram = telegram_captures.lock().await.clone();
+@@ -1005,6 +1239,105 @@ mod tests {
+         assert_eq!(telegram[0].1.content, "hello");
+     }
+
++    #[cfg(feature = "libsql")]
++    #[tokio::test]
++    async fn message_tool_resolves_simon_recipient_hint_to_registry_target() -> Result<(), String> {
++        let registry = serde_json::json!({
++            "users": [
++                {
++                    "canonicalId": "alon",
++                    "channelBindings": [
++                        {
++                            "channel": "simon_telegram_channel",
++                            "target": "424242"
++                        }
++                    ]
++                }
++            ]
++        })
++        .to_string();
++        let extension_manager = make_simon_extension_manager(&registry, Some(999999)).await?;
++
++        let channel_manager = ChannelManager::new();
++        let (channel, captures) = RecordingBroadcastChannel::new("simon_telegram_channel");
++        channel_manager.add(Box::new(channel)).await;
++        let tool =
++            MessageTool::new(Arc::new(channel_manager)).with_extension_manager(extension_manager);
++
++        let ctx = crate::context::JobContext::new("routine-job", "daily briefing");
++        let result = tool
++            .execute(
++                serde_json::json!({
++                    "content": "good morning",
++                    "channel": "simon_telegram_channel",
++                    "target": "alon"
++                }),
++                &ctx,
++            )
++            .await
++            .map_err(|e| format!("message execute failed: {e}"))?;
++
++        assert_eq!(
++            result.result.as_str(),
++            Some("Sent message to simon_telegram_channel")
++        );
++        let messages = captures.lock().await.clone();
++        assert_eq!(messages.len(), 1);
++        assert_eq!(messages[0].0, "424242");
++        assert_eq!(messages[0].1.content, "good morning");
++        Ok(())
++    }
++
++    #[cfg(feature = "libsql")]
++    #[tokio::test]
++    async fn message_tool_resolves_simon_metadata_recipient_hint_to_registry_target()
++    -> Result<(), String> {
++        let registry = serde_json::json!({
++            "users": [
++                {
++                    "canonicalId": "alon",
++                    "channelBindings": [
++                        {
++                            "channel": "simon_telegram_channel",
++                            "target": "424242"
++                        }
++                    ]
++                }
++            ]
++        })
++        .to_string();
++        let extension_manager = make_simon_extension_manager(&registry, Some(999999)).await?;
++
++        let channel_manager = ChannelManager::new();
++        let (channel, captures) = RecordingBroadcastChannel::new("simon_telegram_channel");
++        channel_manager.add(Box::new(channel)).await;
++        let tool =
++            MessageTool::new(Arc::new(channel_manager)).with_extension_manager(extension_manager);
++
++        let mut ctx =
++            crate::context::JobContext::with_user("owner-scope", "routine-job", "daily briefing");
++        ctx.metadata = serde_json::json!({
++            "notify_channel": "simon_telegram_channel",
++            "notify_user": "alon",
++            "owner_id": "owner-scope"
++        });
++
++        let result = tool
++            .execute(serde_json::json!({"content": "good morning"}), &ctx)
++            .await
++            .map_err(|e| format!("message execute failed: {e}"))?;
++
++        assert_eq!(
++            result.result.as_str(),
++            Some("Sent message to simon_telegram_channel")
++        );
++        let messages = captures.lock().await.clone();
++        assert_eq!(messages.len(), 1);
++        assert_eq!(messages[0].0, "424242");
++        assert_eq!(messages[0].1.content, "good morning");
++        Ok(())
++    }
++
+     #[tokio::test]
+     async fn message_tool_notify_user_only_metadata_does_not_reuse_stale_default_channel() {
+         let (tool, gateway_captures, telegram_captures) =
+diff --git a/src/tools/registry.rs b/src/tools/registry.rs
+index d6d8fccf..5893a9a1 100644
+--- a/src/tools/registry.rs
++++ b/src/tools/registry.rs
+@@ -643,7 +643,7 @@ impl ToolRegistry {
+         }
+     }
+
+-    fn workspace_resolver(
++    pub(crate) fn workspace_resolver(
+         &self,
+     ) -> Option<Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>> {
+         self.workspace_resolver

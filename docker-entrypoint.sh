@@ -34,6 +34,10 @@ if [ -z "${PORT:-}" ]; then
   export PORT=8080
 fi
 
+export IRONCLAW_FORCE_ACTIVE_WASM_CHANNELS="${IRONCLAW_FORCE_ACTIVE_WASM_CHANNELS:-simon_telegram_channel}"
+
+/usr/local/bin/simon-preseed-extensions.sh
+
 if [ "$#" -gt 0 ]; then
   if [ "$1" = "ironclaw" ]; then
     exec "$@"

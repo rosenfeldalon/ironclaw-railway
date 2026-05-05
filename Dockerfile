@@ -17,9 +17,11 @@ WORKDIR /build/ironclaw
 COPY patches/0001-wasm-workspace-reader.patch /tmp/0001-wasm-workspace-reader.patch
 COPY patches/0002-recipient-first-notification-routing.patch /tmp/0002-recipient-first-notification-routing.patch
 COPY patches/0003-simon-daily-briefing-clean-notifications.patch /tmp/0003-simon-daily-briefing-clean-notifications.patch
+COPY patches/0004-force-active-wasm-channels.patch /tmp/0004-force-active-wasm-channels.patch
 RUN git apply /tmp/0001-wasm-workspace-reader.patch
 RUN git apply /tmp/0002-recipient-first-notification-routing.patch
 RUN git apply /tmp/0003-simon-daily-briefing-clean-notifications.patch
+RUN git apply /tmp/0004-force-active-wasm-channels.patch
 
 RUN cargo build --release --bin ironclaw
 
@@ -38,8 +40,10 @@ COPY --from=caddy_builder /usr/bin/caddy /usr/bin/caddy
 
 COPY Caddyfile /etc/caddy/Caddyfile
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY simon-preseed-extensions.sh /usr/local/bin/simon-preseed-extensions.sh
 
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/simon-preseed-extensions.sh \
     && useradd -m -u 1000 -s /bin/bash ironclaw
 
 USER ironclaw
@@ -47,5 +51,6 @@ WORKDIR /home/ironclaw
 
 ENV RUST_LOG=ironclaw=info
 ENV SANDBOX_ENABLED=false
+ENV IRONCLAW_FORCE_ACTIVE_WASM_CHANNELS=simon_telegram_channel
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

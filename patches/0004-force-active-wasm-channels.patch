@@ -1,0 +1,68 @@
+diff --git a/src/main.rs b/src/main.rs
+index a92e12a4..ed95847f 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -114,6 +114,17 @@ where
+     normalized
+ }
+
++fn forced_startup_wasm_channel_names() -> std::collections::HashSet<String> {
++    let raw = std::env::var("IRONCLAW_FORCE_ACTIVE_WASM_CHANNELS")
++        .or_else(|_| std::env::var("WASM_CHANNELS_FORCE_ACTIVE"))
++        .unwrap_or_default();
++    parse_forced_startup_wasm_channel_names(&raw)
++}
++
++fn parse_forced_startup_wasm_channel_names(raw: &str) -> std::collections::HashSet<String> {
++    normalize_persisted_wasm_channel_names(raw.split(',').map(str::trim).filter(|s| !s.is_empty()))
++}
++
+ async fn persisted_active_wasm_channel_names(
+     ext_mgr: &ironclaw::extensions::ExtensionManager,
+     user_id: &str,
+@@ -498,6 +509,18 @@ async fn async_main() -> anyhow::Result<()> {
+         } else {
+             std::collections::HashSet::new()
+         };
++    let forced_active_wasm_channels = forced_startup_wasm_channel_names();
++    let persisted_active_wasm_channels: std::collections::HashSet<String> =
++        persisted_active_wasm_channels
++            .union(&forced_active_wasm_channels)
++            .cloned()
++            .collect();
++    if !forced_active_wasm_channels.is_empty() {
++        tracing::info!(
++            channels = ?forced_active_wasm_channels,
++            "Forcing WASM channels active at startup"
++        );
++    }
+
+     let channels = ChannelManager::new();
+     let mut channel_names: Vec<String> = Vec::new();
+@@ -1739,6 +1762,26 @@ mod tests {
+         assert!(normalized.contains("telegram"));
+     }
+
++    #[test]
++    fn parse_forced_startup_wasm_channel_names_canonicalizes_csv() {
++        let normalized =
++            parse_forced_startup_wasm_channel_names(" simon-telegram-channel, telegram, ,telegram");
++
++        assert_eq!(normalized.len(), 2);
++        assert!(normalized.contains("simon_telegram_channel"));
++        assert!(normalized.contains("telegram"));
++    }
++
++    #[test]
++    fn parse_forced_startup_wasm_channel_names_skips_invalid_entries() {
++        let normalized = parse_forced_startup_wasm_channel_names("simon_telegram_channel,../bad");
++
++        assert_eq!(
++            normalized,
++            std::collections::HashSet::from(["simon_telegram_channel".to_string()])
++        );
++    }
++
+     #[test]
+     fn normalize_persisted_wasm_channel_names_skips_invalid_entries() {
+         let normalized = normalize_persisted_wasm_channel_names(["../bad", "telegram"]);
