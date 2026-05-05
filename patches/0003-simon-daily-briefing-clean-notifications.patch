@@ -1,0 +1,81 @@
+diff --git a/src/agent/routine_engine.rs b/src/agent/routine_engine.rs
+index 9a30823a..3ed21295 100644
+--- a/src/agent/routine_engine.rs
++++ b/src/agent/routine_engine.rs
+@@ -2120,10 +2120,7 @@ async fn send_notification(
+         RunStatus::Running => "⏳",
+     };
+ 
+-    let message = match summary {
+-        Some(s) => format!("{} *Routine '{}'*: {}\n\n{}", icon, routine_name, status, s),
+-        None => format!("{} *Routine '{}'*: {}", icon, routine_name, status),
+-    };
++    let message = routine_notification_content(icon, routine_name, status, summary);
+ 
+     let response = OutgoingResponse {
+         content: message,
+@@ -2148,6 +2145,30 @@ async fn send_notification(
+     }
+ }
+ 
++fn routine_notification_content(
++    icon: &str,
++    routine_name: &str,
++    status: RunStatus,
++    summary: Option<&str>,
++) -> String {
++    if let Some(summary) = summary
++        && status == RunStatus::Attention
++        && is_final_simon_daily_briefing(routine_name, summary)
++    {
++        return summary.to_string();
++    }
++
++    match summary {
++        Some(s) => format!("{} *Routine '{}'*: {}\n\n{}", icon, routine_name, status, s),
++        None => format!("{} *Routine '{}'*: {}", icon, routine_name, status),
++    }
++}
++
++fn is_final_simon_daily_briefing(routine_name: &str, summary: &str) -> bool {
++    routine_name.starts_with("daily-briefing-")
++        && (summary.contains("תדריך משפחתי") || summary.contains("Family Briefing"))
++}
++
+ /// Spawn the cron ticker background task.
+ pub fn spawn_cron_ticker(
+     engine: Arc<RoutineEngine>,
+@@ -2700,6 +2721,33 @@ mod tests {
+         assert!(!should_notify);
+     }
+ 
++    #[test]
++    fn test_simon_daily_briefing_notification_uses_summary_as_final_message() {
++        let summary = "תדריך משפחתי · יום שלישי · 2026-05-05\n\nביומן היום\n- 12:00-13:00 טיפול";
++        let message = super::routine_notification_content(
++            "🔔",
++            "daily-briefing-alon",
++            RunStatus::Attention,
++            Some(summary),
++        );
++
++        assert_eq!(message, summary);
++        assert!(!message.contains("Routine 'daily-briefing-alon'"));
++    }
++
++    #[test]
++    fn test_non_briefing_attention_notification_keeps_host_banner() {
++        let message = super::routine_notification_content(
++            "🔔",
++            "inbox-check",
++            RunStatus::Attention,
++            Some("Needs review"),
++        );
++
++        assert!(message.contains("*Routine 'inbox-check'*: attention"));
++        assert!(message.contains("Needs review"));
++    }
++
+     #[test]
+     fn test_full_job_dispatch_returns_running_status() {
+         assert_eq!(RunStatus::Running.to_string(), "running");
