@@ -136,7 +136,7 @@ index 955552c4..cf248706 100644
      let discovered_channels =
          match crate::channels::wasm::discover_channels(&config.channels.wasm_channels_dir).await {
 diff --git a/src/channels/wasm/wrapper.rs b/src/channels/wasm/wrapper.rs
-index 6d8a90ab..803661f2 100644
+index 6d8a90ab..94479902 100644
 --- a/src/channels/wasm/wrapper.rs
 +++ b/src/channels/wasm/wrapper.rs
 @@ -51,6 +51,7 @@ use crate::channels::wasm::router::RegisteredEndpoint;
@@ -222,7 +222,9 @@ index 6d8a90ab..803661f2 100644
 -    };
 +    }
 +}
-+
+ 
+-    let load_value = if load_value.is_none() && owner_scope_id != "default" {
+-        match store.get_setting("default", &key).await {
 +async fn do_load_durable_workspace(
 +    channel_name: &str,
 +    owner_scope_id: &str,
@@ -235,9 +237,7 @@ index 6d8a90ab..803661f2 100644
 +    if durable_paths.is_empty() {
 +        return;
 +    }
- 
--    let load_value = if load_value.is_none() && owner_scope_id != "default" {
--        match store.get_setting("default", &key).await {
++
 +    if let Some(store) = settings_store {
 +        let key = durable_workspace_settings_key(channel_name);
 +        let load_value = match store.get_setting(owner_scope_id, &key).await {
@@ -373,7 +373,21 @@ index 6d8a90ab..803661f2 100644
          )
          .await;
      }
-@@ -1325,6 +1416,16 @@ impl WasmChannel {
+@@ -1310,13 +1401,6 @@ impl WasmChannel {
+             return;
+         }
+ 
+-        if !committed_paths
+-            .iter()
+-            .any(|path| self.capabilities.is_durable_workspace_path(path))
+-        {
+-            return;
+-        }
+-
+         do_persist_durable_workspace(
+             &self.name,
+             &self.owner_scope_id,
+@@ -1325,6 +1409,16 @@ impl WasmChannel {
              self.settings_store.as_ref(),
          )
          .await;
@@ -390,7 +404,7 @@ index 6d8a90ab..803661f2 100644
      }
  
      /// Update broadcast metadata in memory and persist if changed (best-effort).
-@@ -1448,6 +1549,8 @@ impl WasmChannel {
+@@ -1448,6 +1542,8 @@ impl WasmChannel {
          let callback_lock = self.callback_lock.clone();
          let last_broadcast_metadata = self.last_broadcast_metadata.clone();
          let settings_store = self.settings_store.clone();
@@ -399,7 +413,7 @@ index 6d8a90ab..803661f2 100644
          let owner_scope_id = self.owner_scope_id.clone();
          let websocket_secrets_store = self.secrets_store.clone();
          let websocket_poll_lock = Arc::clone(&self.websocket_poll_lock);
-@@ -1607,6 +1710,8 @@ impl WasmChannel {
+@@ -1607,6 +1703,8 @@ impl WasmChannel {
                                                              rate_limiter: Arc::clone(&rate_limiter),
                                                              last_broadcast_metadata: Arc::clone(&last_broadcast_metadata),
                                                              settings_store: settings_store.clone(),
@@ -408,7 +422,7 @@ index 6d8a90ab..803661f2 100644
                                                              owner_scope_id: owner_scope_id.clone(),
                                                              owner_actor_id: owner_actor_id.clone(),
                                                              secrets_store: websocket_secrets_store.clone(),
-@@ -2565,6 +2670,8 @@ impl WasmChannel {
+@@ -2565,6 +2663,8 @@ impl WasmChannel {
          workspace_store: &Arc<ChannelWorkspaceStore>,
          callback_lock: &Arc<tokio::sync::Mutex<()>>,
          settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
@@ -417,7 +431,20 @@ index 6d8a90ab..803661f2 100644
          timeout: Duration,
          wit_update: wit_channel::StatusUpdate,
      ) -> Result<(), WasmChannelError> {
-@@ -2633,6 +2740,16 @@ impl WasmChannel {
+@@ -2620,11 +2720,7 @@ impl WasmChannel {
+ 
+         match result {
+             Ok(Ok(committed_paths)) => {
+-                if committed_paths.iter().any(|path| {
+-                    durable_workspace_paths
+-                        .iter()
+-                        .any(|durable| durable == path)
+-                }) {
++                if !committed_paths.is_empty() {
+                     do_persist_durable_workspace(
+                         channel_name,
+                         &owner_scope_id_owned,
+@@ -2633,6 +2729,16 @@ impl WasmChannel {
                          settings_store,
                      )
                      .await;
@@ -434,7 +461,7 @@ index 6d8a90ab..803661f2 100644
                  }
                  Ok(())
              }
-@@ -2709,6 +2826,8 @@ impl WasmChannel {
+@@ -2709,6 +2815,8 @@ impl WasmChannel {
                  let workspace_store = self.workspace_store.clone();
                  let callback_lock = self.callback_lock.clone();
                  let settings_store = self.settings_store.clone();
@@ -443,7 +470,7 @@ index 6d8a90ab..803661f2 100644
                  let callback_timeout = self.runtime.config().callback_timeout;
                  let Some(wit_update) = status_to_wit(&status, metadata) else {
                      return Ok(());
-@@ -2737,6 +2856,8 @@ impl WasmChannel {
+@@ -2737,6 +2845,8 @@ impl WasmChannel {
                              &workspace_store,
                              &callback_lock,
                              settings_store.as_ref(),
@@ -452,7 +479,7 @@ index 6d8a90ab..803661f2 100644
                              callback_timeout,
                              wit_update_clone,
                          )
-@@ -3008,6 +3129,8 @@ impl WasmChannel {
+@@ -3008,6 +3118,8 @@ impl WasmChannel {
          let callback_lock = self.callback_lock.clone();
          let last_broadcast_metadata = self.last_broadcast_metadata.clone();
          let settings_store = self.settings_store.clone();
@@ -461,7 +488,7 @@ index 6d8a90ab..803661f2 100644
          let poll_secrets_store = self.secrets_store.clone();
          let owner_scope_id = self.owner_scope_id.clone();
  
-@@ -3044,6 +3167,8 @@ impl WasmChannel {
+@@ -3044,6 +3156,8 @@ impl WasmChannel {
                              &workspace_store,
                              &callback_lock,
                              settings_store.as_ref(),
@@ -470,7 +497,7 @@ index 6d8a90ab..803661f2 100644
                              callback_timeout,
                          ).await;
  
-@@ -3127,6 +3252,8 @@ impl WasmChannel {
+@@ -3127,6 +3241,8 @@ impl WasmChannel {
          workspace_store: &Arc<ChannelWorkspaceStore>,
          callback_lock: &Arc<tokio::sync::Mutex<()>>,
          settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
@@ -479,7 +506,20 @@ index 6d8a90ab..803661f2 100644
          timeout: Duration,
      ) -> Result<Vec<EmittedMessage>, WasmChannelError> {
          // Skip if no WASM bytes (testing mode)
-@@ -3203,6 +3330,16 @@ impl WasmChannel {
+@@ -3190,11 +3306,7 @@ impl WasmChannel {
+ 
+         match result {
+             Ok(Ok((mut host_state, committed_paths))) => {
+-                if committed_paths.iter().any(|path| {
+-                    durable_workspace_paths
+-                        .iter()
+-                        .any(|durable| durable == path)
+-                }) {
++                if !committed_paths.is_empty() {
+                     do_persist_durable_workspace(
+                         channel_name,
+                         &owner_scope_id_owned,
+@@ -3203,6 +3315,16 @@ impl WasmChannel {
                          settings_store,
                      )
                      .await;
@@ -496,7 +536,7 @@ index 6d8a90ab..803661f2 100644
                  }
                  let _ = drain_guest_logs(channel_name, "on_poll", &mut host_state);
                  let emitted = host_state.take_emitted_messages();
-@@ -4096,6 +4233,8 @@ struct WebsocketPollContext {
+@@ -4096,6 +4218,8 @@ struct WebsocketPollContext {
      rate_limiter: Arc<RwLock<ChannelEmitRateLimiter>>,
      last_broadcast_metadata: Arc<tokio::sync::RwLock<Option<String>>>,
      settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
@@ -505,7 +545,7 @@ index 6d8a90ab..803661f2 100644
      owner_scope_id: String,
      owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
      secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
-@@ -4148,6 +4287,8 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
+@@ -4148,6 +4272,8 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                  &ctx.workspace_store,
                  &ctx.callback_lock,
                  ctx.settings_store.as_ref(),
@@ -514,7 +554,7 @@ index 6d8a90ab..803661f2 100644
                  ctx.callback_timeout,
              )
              .await
-@@ -6012,6 +6153,8 @@ mod tests {
+@@ -6012,6 +6138,8 @@ mod tests {
              &workspace_store,
              &callback_lock,
              None,
@@ -523,7 +563,7 @@ index 6d8a90ab..803661f2 100644
              timeout,
          )
          .await;
-@@ -6119,6 +6262,79 @@ mod tests {
+@@ -6119,6 +6247,79 @@ mod tests {
          );
      }
  
