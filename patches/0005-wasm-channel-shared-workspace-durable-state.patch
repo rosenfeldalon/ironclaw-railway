@@ -702,4 +702,62 @@ index 300b18f5..0e2254c7 100644
  
 +    /// Attach the shared workspace used by the running app.
 +    pub fn with_shared_workspace(mut self, workspace: Arc<Workspace>) -> Self {
-+        self.shared_works
++        self.shared_workspace = Some(workspace);
++        self
++    }
++
+     async fn clear_pending_extension_auth(&self, name: &str, user_id: &str) {
+         {
+             let mut pending = self.pending_auth.write().await;
+@@ -6147,8 +6158,18 @@ impl ExtensionManager {
+                 Arc::clone(&pairing_store),
+                 settings_store,
+                 self.user_id.clone(),
+-            )
++            );
++            let loader = if let Some(db) = self.store.as_ref() {
++                loader.with_database(Arc::clone(db))
++            } else {
++                loader
++            }
+             .with_secrets_store(Arc::clone(&self.secrets));
++            let loader = if let Some(workspace) = self.shared_workspace.as_ref() {
++                loader.with_shared_workspace(Arc::clone(workspace))
++            } else {
++                loader
++            };
+             loader
+                 .load_from_files(name, &wasm_path, cap_path_option)
+                 .await
+@@ -6163,8 +6184,18 @@ impl ExtensionManager {
+                 Arc::clone(&pairing_store),
+                 settings_store,
+                 self.user_id.clone(),
+-            )
++            );
++            let loader = if let Some(db) = self.store.as_ref() {
++                loader.with_database(Arc::clone(db))
++            } else {
++                loader
++            }
+             .with_secrets_store(Arc::clone(&self.secrets));
++            let loader = if let Some(workspace) = self.shared_workspace.as_ref() {
++                loader.with_shared_workspace(Arc::clone(workspace))
++            } else {
++                loader
++            };
+             loader
+                 .load_from_files(name, &wasm_path, cap_path_option)
+                 .await
+diff --git a/src/main.rs b/src/main.rs
+index ed95847f..5521973d 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -709,6 +709,7 @@ async fn async_main() -> anyhow::Result<()> {
+             &components.secrets_store,
+             components.extension_manager.as_ref(),
+             components.db.as_ref(),
++            components.workspace.as_ref(),
+             &channel_names,
+             settings_persistence_available.then_some(&persisted_active_wasm_channels),
+             Arc::clone(&components.ownership_cache),
