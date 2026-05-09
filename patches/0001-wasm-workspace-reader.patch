@@ -67,7 +67,7 @@ index 356911ae..d6d8fccf 100644
 +        }
 +    }
 +
-+    fn workspace_resolver(
++    pub(crate) fn workspace_resolver(
 +        &self,
 +    ) -> Option<Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>> {
 +        self.workspace_resolver
@@ -212,4 +212,3 @@ index 26bef557..524fde8e 100644
              tokio::task::spawn_blocking(move || {
 -- 
 2.53.0
-

@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 
 ARG IRONCLAW_REPO=https://github.com/nearai/ironclaw.git
-ARG IRONCLAW_REF=ironclaw-v0.27.0
+ARG IRONCLAW_REF=ironclaw-v0.28.0
 RUN git clone --depth 1 --branch "${IRONCLAW_REF}" "${IRONCLAW_REPO}" /build/ironclaw
 
 WORKDIR /build/ironclaw
@@ -18,12 +18,10 @@ COPY patches/0001-wasm-workspace-reader.patch /tmp/0001-wasm-workspace-reader.pa
 COPY patches/0002-recipient-first-notification-routing.patch /tmp/0002-recipient-first-notification-routing.patch
 COPY patches/0003-simon-daily-briefing-clean-notifications.patch /tmp/0003-simon-daily-briefing-clean-notifications.patch
 COPY patches/0004-force-active-wasm-channels.patch /tmp/0004-force-active-wasm-channels.patch
-COPY patches/0005-wasm-channel-shared-workspace-durable-state.patch /tmp/0005-wasm-channel-shared-workspace-durable-state.patch
 RUN git apply /tmp/0001-wasm-workspace-reader.patch
 RUN git apply /tmp/0002-recipient-first-notification-routing.patch
 RUN git apply /tmp/0003-simon-daily-briefing-clean-notifications.patch
 RUN git apply /tmp/0004-force-active-wasm-channels.patch
-RUN git apply /tmp/0005-wasm-channel-shared-workspace-durable-state.patch
 
 RUN cargo build --release --bin ironclaw
 
