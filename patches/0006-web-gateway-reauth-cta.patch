@@ -1,0 +1,79 @@
+diff --git a/crates/ironclaw_gateway/static/i18n/en.js b/crates/ironclaw_gateway/static/i18n/en.js
+index 2a60622..a2832e2 100644
+--- a/crates/ironclaw_gateway/static/i18n/en.js
++++ b/crates/ironclaw_gateway/static/i18n/en.js
+@@ -237,6 +237,8 @@ I18n.register('en', {
+   'extensions.remove': 'Remove',
+   'extensions.activate': 'Activate',
+   'extensions.reconfigure': 'Reconfigure',
++  'extensions.authenticate': 'Authenticate',
++  'extensions.reconnectAuth': 'Reconnect',
+   'extensions.tools': 'Tools',
+   'extensions.noConfigNeeded': 'No configuration needed for {name}',
+   'extensions.configure': 'Configure {name}',
+diff --git a/crates/ironclaw_gateway/static/i18n/ko.js b/crates/ironclaw_gateway/static/i18n/ko.js
+index ac12c03..a4aa8c3 100644
+--- a/crates/ironclaw_gateway/static/i18n/ko.js
++++ b/crates/ironclaw_gateway/static/i18n/ko.js
+@@ -235,6 +235,8 @@ I18n.register('ko', {
+   'extensions.remove': '제거',
+   'extensions.activate': '활성화',
+   'extensions.reconfigure': '재구성',
++  'extensions.authenticate': '인증',
++  'extensions.reconnectAuth': '다시 인증',
+   'extensions.tools': '도구',
+   'extensions.noConfigNeeded': '{name}에는 구성이 필요하지 않습니다',
+   'extensions.configure': '{name} 구성',
+diff --git a/crates/ironclaw_gateway/static/i18n/zh-CN.js b/crates/ironclaw_gateway/static/i18n/zh-CN.js
+index 8a761c5..fa7b252 100644
+--- a/crates/ironclaw_gateway/static/i18n/zh-CN.js
++++ b/crates/ironclaw_gateway/static/i18n/zh-CN.js
+@@ -237,6 +237,8 @@ I18n.register('zh-CN', {
+   'extensions.remove': '移除',
+   'extensions.activate': '激活',
+   'extensions.reconfigure': '重新配置',
++  'extensions.authenticate': '认证',
++  'extensions.reconnectAuth': '重新认证',
+   'extensions.tools': '工具',
+   'extensions.noConfigNeeded': '{name} 不需要配置',
+   'extensions.configure': '配置 {name}',
+diff --git a/crates/ironclaw_gateway/static/js/surfaces/extensions.js b/crates/ironclaw_gateway/static/js/surfaces/extensions.js
+index 888d429..72d5921 100644
+--- a/crates/ironclaw_gateway/static/js/surfaces/extensions.js
++++ b/crates/ironclaw_gateway/static/js/surfaces/extensions.js
+@@ -346,8 +346,19 @@ function renderExtensionCard(ext) {
+     activeLabel.textContent = ext.active ? I18n.t('ext.active') : I18n.t('status.installed');
+     actions.appendChild(activeLabel);
+ 
+-    // MCP servers and channel-relay extensions may be installed but inactive — show Activate button
+-    if ((ext.kind === 'mcp_server' || ext.kind === 'channel_relay') && !ext.active) {
++    // Installed unauthenticated tools need an auth CTA, not a dead-end
++    // configure flow. Their setup secrets may already be present, while the
++    // per-user OAuth grant is missing or revoked.
++    if (!ext.needs_setup && ext.has_auth && !ext.authenticated) {
++      const authBtn = document.createElement('button');
++      authBtn.className = 'btn-ext activate';
++      authBtn.textContent = ext.active
++        ? I18n.t('extensions.reconnectAuth')
++        : I18n.t('extensions.authenticate');
++      authBtn.addEventListener('click', () => activateExtension(ext.name));
++      actions.appendChild(authBtn);
++    } else if ((ext.kind === 'mcp_server' || ext.kind === 'channel_relay') && !ext.active) {
++      // MCP servers and channel-relay extensions may be installed but inactive.
+       const activateBtn = document.createElement('button');
+       activateBtn.className = 'btn-ext activate';
+       activateBtn.textContent = I18n.t('common.activate');
+@@ -355,10 +366,9 @@ function renderExtensionCard(ext) {
+       actions.appendChild(activateBtn);
+     }
+ 
+-    // Show Configure/Reconfigure button when there are secrets to enter.
+-    // Skip when has_auth is true but needs_setup is false and not yet authenticated —
+-    // this means OAuth credentials resolve automatically (builtin/env) and the user
+-    // just needs to complete the OAuth flow, not fill in a config form.
++    // Show Configure/Reconfigure only when setup fields are genuinely needed,
++    // or when authenticated operators are intentionally revisiting stored
++    // setup secrets. Unauthenticated tools should go through the auth CTA above.
+     if (ext.needs_setup || (ext.has_auth && ext.authenticated)) {
+       const configBtn = document.createElement('button');
+       configBtn.className = 'btn-ext configure';

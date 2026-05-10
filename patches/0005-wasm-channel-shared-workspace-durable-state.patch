@@ -1,5 +1,5 @@
 diff --git a/src/app.rs b/src/app.rs
-index d3f15eb0..02b0ef26 100644
+index 931d4af..a7d025e 100644
 --- a/src/app.rs
 +++ b/src/app.rs
 @@ -695,6 +695,7 @@ impl AppBuilder {
@@ -7,30 +7,29 @@ index d3f15eb0..02b0ef26 100644
          hooks: &Arc<HookRegistry>,
          settings_store_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
 +        shared_workspace: Option<Arc<Workspace>>,
+         ownership_cache: Arc<crate::ownership::OwnershipCache>,
      ) -> Result<
          (
-             Arc<McpSessionManager>,
-@@ -989,6 +990,9 @@ impl AppBuilder {
+@@ -990,6 +991,9 @@ impl AppBuilder {
              if let Some(ref ss) = settings_store_override {
                  em = em.with_settings_store(Arc::clone(ss));
              }
 +            if let Some(ref ws) = shared_workspace {
 +                em = em.with_shared_workspace(Arc::clone(ws));
 +            }
-             let manager = Arc::new(em);
-             tools.register_extension_tools(Arc::clone(&manager));
- 
-@@ -1189,7 +1193,7 @@ impl AppBuilder {
-             catalog_entries,
-             dev_loaded_tool_names,
-         ) = self
--            .init_extensions(&tools, &hooks, settings_store.clone())
-+            .init_extensions(&tools, &hooks, settings_store.clone(), workspace.clone())
+             if let Some(ref db) = self.db {
+                 let ps = Arc::new(crate::pairing::PairingStore::new(
+                     Arc::clone(db),
+@@ -1202,6 +1206,7 @@ impl AppBuilder {
+                 &tools,
+                 &hooks,
+                 settings_store.clone(),
++                workspace.clone(),
+                 Arc::clone(&ownership_cache),
+             )
              .await?;
- 
-         // Load bootstrap-completed flag from settings so that existing users
 diff --git a/src/channels/wasm/loader.rs b/src/channels/wasm/loader.rs
-index 4ca40873..b2f31857 100644
+index 4ca4087..70d9051 100644
 --- a/src/channels/wasm/loader.rs
 +++ b/src/channels/wasm/loader.rs
 @@ -17,16 +17,20 @@ use crate::channels::wasm::error::WasmChannelError;
@@ -42,7 +41,7 @@ index 4ca40873..b2f31857 100644
  use crate::pairing::PairingStore;
  use crate::secrets::SecretsStore;
 +use crate::workspace::Workspace;
- 
+
  /// Loads WASM channels from the filesystem.
  pub struct WasmChannelLoader {
      runtime: Arc<WasmChannelRuntime>,
@@ -53,8 +52,8 @@ index 4ca40873..b2f31857 100644
 +    shared_workspace: Option<Arc<Workspace>>,
      owner_scope_id: String,
  }
- 
-@@ -42,7 +46,9 @@ impl WasmChannelLoader {
+
+@@ -42,17 +46,31 @@ impl WasmChannelLoader {
              runtime,
              pairing_store,
              settings_store,
@@ -64,17 +63,20 @@ index 4ca40873..b2f31857 100644
              owner_scope_id: owner_scope_id.into(),
          }
      }
-@@ -53,6 +59,18 @@ impl WasmChannelLoader {
-         self
-     }
  
-+    /// Set the database for constructing a fallback shared workspace.
++    /// Set the database used to construct a fallback shared workspace.
 +    pub fn with_database(mut self, db: Arc<dyn Database>) -> Self {
 +        self.database = Some(db);
 +        self
 +    }
 +
-+    /// Set the shared workspace for mirroring durable channel state.
+     /// Set the secrets store for host-based credential injection in WASM channels.
+     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
+         self.secrets_store = Some(store);
+         self
+     }
+
++    /// Set the shared workspace used by tools and `ironclaw memory`.
 +    pub fn with_shared_workspace(mut self, workspace: Arc<Workspace>) -> Self {
 +        self.shared_workspace = Some(workspace);
 +        self
@@ -100,18 +102,18 @@ index 4ca40873..b2f31857 100644
          tracing::info!(
              name = name,
 diff --git a/src/channels/wasm/setup.rs b/src/channels/wasm/setup.rs
-index 955552c4..cf248706 100644
+index b68ee7a..6c917d7 100644
 --- a/src/channels/wasm/setup.rs
 +++ b/src/channels/wasm/setup.rs
-@@ -26,6 +26,7 @@ use crate::db::Database;
- use crate::extensions::ExtensionManager;
+@@ -28,6 +28,7 @@ use crate::extensions::wechat_login::{
+ };
  use crate::pairing::PairingStore;
  use crate::secrets::SecretsStore;
 +use crate::workspace::Workspace;
  
  pub(crate) fn reserved_wasm_channel_names() -> Vec<&'static str> {
      use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
-@@ -65,6 +66,7 @@ pub async fn setup_wasm_channels(
+@@ -67,6 +68,7 @@ pub async fn setup_wasm_channels(
      secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
      extension_manager: Option<&Arc<ExtensionManager>>,
      database: Option<&Arc<dyn Database>>,
@@ -119,7 +121,7 @@ index 955552c4..cf248706 100644
      registered_channel_names: &[String],
      startup_active_channel_names: Option<&HashSet<String>>,
      ownership_cache: Arc<crate::ownership::OwnershipCache>,
-@@ -91,9 +93,15 @@ pub async fn setup_wasm_channels(
+@@ -93,9 +95,15 @@ pub async fn setup_wasm_channels(
          settings_store.clone(),
          config.owner_id.clone(),
      );
@@ -136,18 +138,18 @@ index 955552c4..cf248706 100644
      let discovered_channels =
          match crate::channels::wasm::discover_channels(&config.channels.wasm_channels_dir).await {
 diff --git a/src/channels/wasm/wrapper.rs b/src/channels/wasm/wrapper.rs
-index 6d8a90ab..4c12b72d 100644
+index 609f003..d42e098 100644
 --- a/src/channels/wasm/wrapper.rs
 +++ b/src/channels/wasm/wrapper.rs
-@@ -51,6 +51,7 @@ use crate::channels::wasm::router::RegisteredEndpoint;
- use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
- use crate::channels::wasm::schema::ChannelConfig;
- use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+@@ -53,6 +53,7 @@ use crate::channels::wasm::schema::ChannelConfig;
+ use crate::channels::{
+     Channel, IncomingMessage, MessageStream, OutgoingAttachment, OutgoingResponse, StatusUpdate,
+ };
 +use crate::db::Database;
  use crate::error::ChannelError;
  use crate::pairing::PairingStore;
  use crate::secrets::SecretsStore;
-@@ -59,6 +60,7 @@ use crate::tools::wasm::credential_injector::{InjectedCredentials, inject_creden
+@@ -61,6 +62,7 @@ use crate::tools::wasm::credential_injector::{InjectedCredentials, inject_creden
  use crate::tools::wasm::{
      LogLevel, WasmResourceLimiter, reject_private_ip, ssrf_safe_client_builder,
  };
@@ -155,11 +157,11 @@ index 6d8a90ab..4c12b72d 100644
  use ironclaw_common::CredentialName;
  use ironclaw_safety::LeakDetector;
  
-@@ -837,6 +839,12 @@ pub struct WasmChannel {
+@@ -842,6 +844,12 @@ pub struct WasmChannel {
      /// Settings store for persisting broadcast metadata across restarts.
      settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
  
-+    /// Shared workspace used by tools and remote memory inspection.
++    /// Shared workspace used by tools and `ironclaw memory`.
 +    shared_workspace: Option<Arc<Workspace>>,
 +
 +    /// Database fallback for constructing a shared workspace on demand.
@@ -168,22 +170,7 @@ index 6d8a90ab..4c12b72d 100644
      /// Stable owner scope for persistent data and owner-target routing.
      owner_scope_id: String,
  
-@@ -917,6 +925,14 @@ async fn do_persist_durable_workspace(
-             .await
-     };
- 
-+    tracing::info!(
-+        channel = %channel_name,
-+        owner_scope_id = %owner_scope_id,
-+        durable_path_count = durable_paths.len(),
-+        snapshot_keys = ?durable_snapshot.keys().collect::<Vec<_>>(),
-+        "Processed durable workspace snapshot"
-+    );
-+
-     if let Err(e) = result {
-         tracing::warn!(
-             channel = %channel_name,
-@@ -926,67 +942,142 @@ async fn do_persist_durable_workspace(
+@@ -934,67 +942,134 @@ async fn do_persist_durable_workspace(
      }
  }
  
@@ -231,21 +218,15 @@ index 6d8a90ab..4c12b72d 100644
 +                path = %path,
 +                "Failed to mirror durable workspace state into shared workspace: {}",
 +                error
-+            );
-+        } else {
-+            tracing::info!(
-+                channel = %channel_name,
-+                owner_scope_id = %owner_scope_id,
-+                path = %path,
-+                content_len = content.len(),
-+                "Mirrored durable workspace state into shared workspace"
              );
 -            None
          }
 -    };
 +    }
 +}
-+
+
+-    let load_value = if load_value.is_none() && owner_scope_id != "default" {
+-        match store.get_setting("default", &key).await {
 +async fn do_load_durable_workspace(
 +    channel_name: &str,
 +    owner_scope_id: &str,
@@ -258,9 +239,7 @@ index 6d8a90ab..4c12b72d 100644
 +    if durable_paths.is_empty() {
 +        return;
 +    }
- 
--    let load_value = if load_value.is_none() && owner_scope_id != "default" {
--        match store.get_setting("default", &key).await {
++
 +    if let Some(store) = settings_store {
 +        let key = durable_workspace_settings_key(channel_name);
 +        let load_value = match store.get_setting(owner_scope_id, &key).await {
@@ -359,7 +338,7 @@ index 6d8a90ab..4c12b72d 100644
  }
  
  fn resolve_message_scope(
-@@ -1123,6 +1214,8 @@ impl WasmChannel {
+@@ -1151,6 +1226,8 @@ impl WasmChannel {
              callback_lock: Arc::new(tokio::sync::Mutex::new(())),
              last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
              settings_store,
@@ -367,8 +346,8 @@ index 6d8a90ab..4c12b72d 100644
 +            shared_workspace_db: None,
              owner_scope_id: owner_scope_id.into(),
              owner_actor_id: Arc::new(tokio::sync::RwLock::new(None)),
-             secrets_store: None,
-@@ -1139,6 +1232,18 @@ impl WasmChannel {
+             channel_bound_user_id: Arc::new(RwLock::new(channel_bound_user_id)),
+@@ -1168,6 +1245,18 @@ impl WasmChannel {
          self
      }
  
@@ -387,7 +366,7 @@ index 6d8a90ab..4c12b72d 100644
      /// Bind this channel to the external actor that maps to the configured owner.
      pub fn with_owner_actor_id(mut self, owner_actor_id: Option<String>) -> Self {
          self.owner_actor_id = Arc::new(tokio::sync::RwLock::new(owner_actor_id));
-@@ -1301,6 +1406,8 @@ impl WasmChannel {
+@@ -1343,6 +1432,8 @@ impl WasmChannel {
              &self.workspace_store,
              self.durable_workspace_paths(),
              self.settings_store.as_ref(),
@@ -396,21 +375,7 @@ index 6d8a90ab..4c12b72d 100644
          )
          .await;
      }
-@@ -1310,13 +1417,6 @@ impl WasmChannel {
-             return;
-         }
- 
--        if !committed_paths
--            .iter()
--            .any(|path| self.capabilities.is_durable_workspace_path(path))
--        {
--            return;
--        }
--
-         do_persist_durable_workspace(
-             &self.name,
-             &self.owner_scope_id,
-@@ -1325,6 +1425,16 @@ impl WasmChannel {
+@@ -1367,6 +1458,16 @@ impl WasmChannel {
              self.settings_store.as_ref(),
          )
          .await;
@@ -427,16 +392,16 @@ index 6d8a90ab..4c12b72d 100644
      }
  
      /// Update broadcast metadata in memory and persist if changed (best-effort).
-@@ -1448,6 +1558,8 @@ impl WasmChannel {
+@@ -1490,6 +1591,8 @@ impl WasmChannel {
          let callback_lock = self.callback_lock.clone();
          let last_broadcast_metadata = self.last_broadcast_metadata.clone();
          let settings_store = self.settings_store.clone();
 +        let shared_workspace = self.shared_workspace.clone();
 +        let shared_workspace_db = self.shared_workspace_db.clone();
          let owner_scope_id = self.owner_scope_id.clone();
+         let channel_bound_user_id = Arc::clone(&self.channel_bound_user_id);
          let websocket_secrets_store = self.secrets_store.clone();
-         let websocket_poll_lock = Arc::clone(&self.websocket_poll_lock);
-@@ -1607,6 +1719,8 @@ impl WasmChannel {
+@@ -1650,6 +1753,8 @@ impl WasmChannel {
                                                              rate_limiter: Arc::clone(&rate_limiter),
                                                              last_broadcast_metadata: Arc::clone(&last_broadcast_metadata),
                                                              settings_store: settings_store.clone(),
@@ -444,8 +409,8 @@ index 6d8a90ab..4c12b72d 100644
 +                                                            shared_workspace_db: shared_workspace_db.clone(),
                                                              owner_scope_id: owner_scope_id.clone(),
                                                              owner_actor_id: owner_actor_id.clone(),
-                                                             secrets_store: websocket_secrets_store.clone(),
-@@ -2565,6 +2679,8 @@ impl WasmChannel {
+                                                             channel_bound_user_id: Arc::clone(&channel_bound_user_id),
+@@ -2633,6 +2738,8 @@ impl WasmChannel {
          workspace_store: &Arc<ChannelWorkspaceStore>,
          callback_lock: &Arc<tokio::sync::Mutex<()>>,
          settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
@@ -454,20 +419,7 @@ index 6d8a90ab..4c12b72d 100644
          timeout: Duration,
          wit_update: wit_channel::StatusUpdate,
      ) -> Result<(), WasmChannelError> {
-@@ -2620,11 +2736,7 @@ impl WasmChannel {
- 
-         match result {
-             Ok(Ok(committed_paths)) => {
--                if committed_paths.iter().any(|path| {
--                    durable_workspace_paths
--                        .iter()
--                        .any(|durable| durable == path)
--                }) {
-+                if !committed_paths.is_empty() {
-                     do_persist_durable_workspace(
-                         channel_name,
-                         &owner_scope_id_owned,
-@@ -2633,6 +2745,16 @@ impl WasmChannel {
+@@ -2701,6 +2808,16 @@ impl WasmChannel {
                          settings_store,
                      )
                      .await;
@@ -484,7 +436,7 @@ index 6d8a90ab..4c12b72d 100644
                  }
                  Ok(())
              }
-@@ -2709,6 +2831,8 @@ impl WasmChannel {
+@@ -2777,6 +2894,8 @@ impl WasmChannel {
                  let workspace_store = self.workspace_store.clone();
                  let callback_lock = self.callback_lock.clone();
                  let settings_store = self.settings_store.clone();
@@ -493,7 +445,7 @@ index 6d8a90ab..4c12b72d 100644
                  let callback_timeout = self.runtime.config().callback_timeout;
                  let Some(wit_update) = status_to_wit(&status, metadata) else {
                      return Ok(());
-@@ -2737,6 +2861,8 @@ impl WasmChannel {
+@@ -2805,6 +2924,8 @@ impl WasmChannel {
                              &workspace_store,
                              &callback_lock,
                              settings_store.as_ref(),
@@ -502,7 +454,7 @@ index 6d8a90ab..4c12b72d 100644
                              callback_timeout,
                              wit_update_clone,
                          )
-@@ -3008,6 +3134,8 @@ impl WasmChannel {
+@@ -3089,6 +3210,8 @@ impl WasmChannel {
          let callback_lock = self.callback_lock.clone();
          let last_broadcast_metadata = self.last_broadcast_metadata.clone();
          let settings_store = self.settings_store.clone();
@@ -510,8 +462,8 @@ index 6d8a90ab..4c12b72d 100644
 +        let shared_workspace_db = self.shared_workspace_db.clone();
          let poll_secrets_store = self.secrets_store.clone();
          let owner_scope_id = self.owner_scope_id.clone();
- 
-@@ -3044,6 +3172,8 @@ impl WasmChannel {
+         let channel_bound_user_id = Arc::clone(&self.channel_bound_user_id);
+@@ -3126,6 +3249,8 @@ impl WasmChannel {
                              &workspace_store,
                              &callback_lock,
                              settings_store.as_ref(),
@@ -520,7 +472,7 @@ index 6d8a90ab..4c12b72d 100644
                              callback_timeout,
                          ).await;
  
-@@ -3127,6 +3257,8 @@ impl WasmChannel {
+@@ -3212,6 +3337,8 @@ impl WasmChannel {
          workspace_store: &Arc<ChannelWorkspaceStore>,
          callback_lock: &Arc<tokio::sync::Mutex<()>>,
          settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
@@ -529,20 +481,7 @@ index 6d8a90ab..4c12b72d 100644
          timeout: Duration,
      ) -> Result<Vec<EmittedMessage>, WasmChannelError> {
          // Skip if no WASM bytes (testing mode)
-@@ -3190,11 +3322,7 @@ impl WasmChannel {
- 
-         match result {
-             Ok(Ok((mut host_state, committed_paths))) => {
--                if committed_paths.iter().any(|path| {
--                    durable_workspace_paths
--                        .iter()
--                        .any(|durable| durable == path)
--                }) {
-+                if !committed_paths.is_empty() {
-                     do_persist_durable_workspace(
-                         channel_name,
-                         &owner_scope_id_owned,
-@@ -3203,6 +3331,16 @@ impl WasmChannel {
+@@ -3291,6 +3418,16 @@ impl WasmChannel {
                          settings_store,
                      )
                      .await;
@@ -558,8 +497,8 @@ index 6d8a90ab..4c12b72d 100644
 +                    .await;
                  }
                  let _ = drain_guest_logs(channel_name, "on_poll", &mut host_state);
-                 let emitted = host_state.take_emitted_messages();
-@@ -4096,6 +4234,8 @@ struct WebsocketPollContext {
+                 poll_result?;
+@@ -4186,6 +4323,8 @@ struct WebsocketPollContext {
      rate_limiter: Arc<RwLock<ChannelEmitRateLimiter>>,
      last_broadcast_metadata: Arc<tokio::sync::RwLock<Option<String>>>,
      settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
@@ -567,8 +506,8 @@ index 6d8a90ab..4c12b72d 100644
 +    shared_workspace_db: Option<Arc<dyn Database>>,
      owner_scope_id: String,
      owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
-     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
-@@ -4148,6 +4288,8 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
+     channel_bound_user_id: Arc<RwLock<Option<String>>>,
+@@ -4239,6 +4378,8 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                  &ctx.workspace_store,
                  &ctx.callback_lock,
                  ctx.settings_store.as_ref(),
@@ -577,7 +516,7 @@ index 6d8a90ab..4c12b72d 100644
                  ctx.callback_timeout,
              )
              .await
-@@ -6012,6 +6154,8 @@ mod tests {
+@@ -6214,6 +6355,8 @@ mod tests {
              &workspace_store,
              &callback_lock,
              None,
@@ -586,7 +525,7 @@ index 6d8a90ab..4c12b72d 100644
              timeout,
          )
          .await;
-@@ -6119,6 +6263,79 @@ mod tests {
+@@ -6321,6 +6464,79 @@ mod tests {
          );
      }
  
@@ -667,10 +606,10 @@ index 6d8a90ab..4c12b72d 100644
      async fn test_dispatch_emitted_messages_sends_to_channel() {
          use crate::channels::wasm::host::EmittedMessage;
 diff --git a/src/extensions/manager.rs b/src/extensions/manager.rs
-index 300b18f5..0e2254c7 100644
+index b4cf98a..105d2a0 100644
 --- a/src/extensions/manager.rs
 +++ b/src/extensions/manager.rs
-@@ -44,6 +44,7 @@ use crate::tools::mcp::auth::{
+@@ -51,6 +51,7 @@ use crate::tools::mcp::auth::{
  use crate::tools::mcp::config::{McpServerConfig, NEARAI_MCP_SERVER_NAME};
  use crate::tools::mcp::session::McpSessionManager;
  use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
@@ -678,7 +617,7 @@ index 300b18f5..0e2254c7 100644
  
  /// Pending OAuth authorization state.
  struct PendingAuth {
-@@ -517,6 +518,9 @@ pub struct ExtensionManager {
+@@ -540,6 +541,9 @@ pub struct ExtensionManager {
      /// When set, settings reads/writes go through this cache-backed store
      /// instead of the raw `Database`. Populated via `with_settings_store()`.
      settings_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
@@ -688,7 +627,7 @@ index 300b18f5..0e2254c7 100644
      /// Names of WASM/relay channels that are actively running in this process.
      ///
      /// This is runtime state, not install/discovery state. Installed WASM
-@@ -774,6 +778,7 @@ impl ExtensionManager {
+@@ -804,6 +808,7 @@ impl ExtensionManager {
              user_id,
              store,
              settings_override: None,
@@ -696,7 +635,7 @@ index 300b18f5..0e2254c7 100644
              active_channel_names: RwLock::new(HashSet::new()),
              installed_relay_extensions: RwLock::new(HashSet::new()),
              activation_errors: RwLock::new(HashMap::new()),
-@@ -1664,6 +1669,12 @@ impl ExtensionManager {
+@@ -1770,6 +1775,12 @@ impl ExtensionManager {
          self
      }
  
@@ -706,10 +645,10 @@ index 300b18f5..0e2254c7 100644
 +        self
 +    }
 +
-     async fn clear_pending_extension_auth(&self, name: &str, user_id: &str) {
-         {
-             let mut pending = self.pending_auth.write().await;
-@@ -6147,8 +6158,18 @@ impl ExtensionManager {
+     pub fn with_pairing_store(mut self, store: Arc<crate::pairing::PairingStore>) -> Self {
+         self.pairing_store = Some(store);
+         self
+@@ -6277,8 +6288,18 @@ impl ExtensionManager {
                  Arc::clone(&pairing_store),
                  settings_store,
                  self.user_id.clone(),
@@ -729,7 +668,7 @@ index 300b18f5..0e2254c7 100644
              loader
                  .load_from_files(name, &wasm_path, cap_path_option)
                  .await
-@@ -6163,8 +6184,18 @@ impl ExtensionManager {
+@@ -6293,8 +6314,18 @@ impl ExtensionManager {
                  Arc::clone(&pairing_store),
                  settings_store,
                  self.user_id.clone(),
@@ -750,7 +689,7 @@ index 300b18f5..0e2254c7 100644
                  .load_from_files(name, &wasm_path, cap_path_option)
                  .await
 diff --git a/src/main.rs b/src/main.rs
-index ed95847f..5521973d 100644
+index c302adb..353e510 100644
 --- a/src/main.rs
 +++ b/src/main.rs
 @@ -709,6 +709,7 @@ async fn async_main() -> anyhow::Result<()> {

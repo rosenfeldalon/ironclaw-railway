@@ -3,6 +3,15 @@ set -euo pipefail
 
 mkdir -p "${HOME}/.ironclaw"
 
+# Keep the gateway auth scope aligned with the runtime owner scope when
+# Railway only provides one of the two variables.
+if [ -n "${IRONCLAW_OWNER_ID:-}" ] && [ -z "${GATEWAY_USER_ID:-}" ]; then
+  export GATEWAY_USER_ID="${IRONCLAW_OWNER_ID}"
+fi
+if [ -n "${GATEWAY_USER_ID:-}" ] && [ -z "${IRONCLAW_OWNER_ID:-}" ]; then
+  export IRONCLAW_OWNER_ID="${GATEWAY_USER_ID}"
+fi
+
 write_ironclaw_env() {
   cat > "${HOME}/.ironclaw/.env" <<EOF
 DATABASE_URL=${DATABASE_URL:-}
@@ -20,9 +29,11 @@ GATEWAY_ENABLED=${GATEWAY_ENABLED:-true}
 GATEWAY_HOST=${GATEWAY_HOST:-127.0.0.1}
 GATEWAY_PORT=${GATEWAY_PORT:-3000}
 GATEWAY_AUTH_TOKEN=${GATEWAY_AUTH_TOKEN:-}
+GATEWAY_USER_ID=${GATEWAY_USER_ID:-}
 HTTP_HOST=${HTTP_HOST:-0.0.0.0}
 HTTP_PORT=${HTTP_PORT:-8081}
 HTTP_WEBHOOK_SECRET=${HTTP_WEBHOOK_SECRET:-}
+IRONCLAW_OWNER_ID=${IRONCLAW_OWNER_ID:-}
 OAUTH_BASE_URL=${OAUTH_BASE_URL:-}
 TUNNEL_URL=${TUNNEL_URL:-}
 EOF

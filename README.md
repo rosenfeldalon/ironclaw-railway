@@ -38,7 +38,10 @@ The current wrapper applies these patches in order:
 4. `0004-force-active-wasm-channels.patch`
    Simon-specific keep. Forces the required Simon WASM channel active at startup in hosted contexts.
 
-`0005-wasm-channel-shared-workspace-durable-state.patch` is intentionally not applied in this slice. Its shared-workspace and durable-state behavior is now substantially present upstream in `0.28.0`, so it is a candidate for later reevaluation rather than a live wrapper dependency.
+5. `0005-wasm-channel-shared-workspace-durable-state.patch`
+   Simon-specific keep. Restores the host/runtime bridge that mirrors declared channel `durable_workspace_paths` into the shared workspace tree used by `ironclaw memory`, `simon_family_identity`, and `simon_daily_briefing`.
+6. `0006-web-gateway-reauth-cta.patch`
+   Simon-specific keep. Fixes the hosted Web Gateway extension card so installed unauthenticated WASM tools surface an auth/reconnect action instead of falling into the misleading `No configuration needed` setup path after an OAuth grant is revoked.
 
 ## Simon Install-Pack Baseline
 
