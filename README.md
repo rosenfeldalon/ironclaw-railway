@@ -47,13 +47,15 @@ The current wrapper applies these patches in order:
 
 The preseed script keeps the current Simon pack versions:
 
-- `simon_telegram_channel` `1.16`
+- `simon_telegram_channel` `1.18`
 - `simon_google_calendar` `0.2.8`
 - `simon_daily_briefing` `0.2.1`
 - `simon_family_identity` `0.1.0`
 - `simon_setup` `0.1.0`
 
-Do not bump these here unless `0.28.0` proves a real compatibility break.
+The Telegram, Google Calendar, and Daily Briefing bundles are fetched from the
+public `main` branch of `simon-ironclaw-extensions`; support bundles still use
+the support tag unless overridden through Railway variables.
 
 ## Railway Shape
 
