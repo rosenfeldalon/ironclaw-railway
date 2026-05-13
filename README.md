@@ -53,10 +53,10 @@ The preseed script keeps the current Simon pack versions:
 - `simon_family_identity` `0.1.0`
 - `simon_setup` `0.1.0`
 
-The wrapper can also preseed `simon_pickup_coordination` `0.1.0` from this repo when Railway variables set:
+The wrapper can also preseed `simon_pickup_coordination` `0.1.0` from the public `simon-ironclaw-extensions` bundle repo when Railway variables set:
 
 - `SIMON_PICKUP_EXTENSION_REF`
-- `SIMON_PICKUP_EXTENSION_RAW_BASE` (optional; defaults to `https://raw.githubusercontent.com/rosenfeldalon/simon-docs`)
+- `SIMON_PICKUP_EXTENSION_RAW_BASE` (optional; defaults to the same public raw base as the other Simon bundles)
 
 The Telegram, Google Calendar, and Daily Briefing bundles are fetched from the
 public `main` branch of `simon-ironclaw-extensions`; support bundles still use

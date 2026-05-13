@@ -58,7 +58,7 @@ CALENDAR_TAG="${SIMON_CALENDAR_EXTENSION_TAG:-main}"
 SUPPORT_TAG="${SIMON_SUPPORT_EXTENSION_TAG:-ironclaw-simon-install-pack-support-2026-05-05}"
 RAW_BASE="${SIMON_EXTENSION_RAW_BASE:-https://raw.githubusercontent.com/rosenfeldalon/simon-ironclaw-extensions}"
 PICKUP_REF="${SIMON_PICKUP_EXTENSION_REF:-}"
-PICKUP_RAW_BASE="${SIMON_PICKUP_EXTENSION_RAW_BASE:-https://raw.githubusercontent.com/rosenfeldalon/simon-docs}"
+PICKUP_RAW_BASE="${SIMON_PICKUP_EXTENSION_RAW_BASE:-${RAW_BASE}}"
 
 install_bundle \
   simon_telegram_channel \
@@ -89,7 +89,7 @@ if [ -n "${PICKUP_REF}" ]; then
   install_bundle \
     simon_pickup_coordination \
     wasm_tool \
-    "${PICKUP_RAW_BASE}/${PICKUP_REF}/extensions/ironclaw-bundles/simon_pickup_coordination/0.1.0/simon_pickup_coordination.tar.gz"
+    "${PICKUP_RAW_BASE}/${PICKUP_REF}/bundles/simon_pickup_coordination/0.1.0.tar.gz"
 else
   echo "Skipping simon_pickup_coordination preseed because SIMON_PICKUP_EXTENSION_REF is not set"
 fi
