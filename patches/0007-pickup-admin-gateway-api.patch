@@ -1,0 +1,317 @@
+diff --git a/src/channels/web/features/mod.rs b/src/channels/web/features/mod.rs
+index e02cb3f..e879c73 100644
+--- a/src/channels/web/features/mod.rs
++++ b/src/channels/web/features/mod.rs
+@@ -18,6 +18,7 @@ pub(crate) mod jobs;
+ pub(crate) mod logs;
+ pub(crate) mod oauth;
+ pub(crate) mod pairing;
++pub(crate) mod pickup;
+ pub(crate) mod routines;
+ pub(crate) mod settings;
+ pub(crate) mod status;
+diff --git a/src/channels/web/platform/router.rs b/src/channels/web/platform/router.rs
+index 684f9a8..642684d 100644
+--- a/src/channels/web/platform/router.rs
++++ b/src/channels/web/platform/router.rs
+@@ -89,6 +89,7 @@ use crate::channels::web::features::oauth::{
+     oauth_callback_handler, relay_events_handler, slack_relay_oauth_callback_handler,
+ };
+ use crate::channels::web::features::pairing::{pairing_approve_handler, pairing_list_handler};
++use crate::channels::web::features::pickup::{pickup_action_handler, pickup_admin_view_handler};
+ use crate::channels::web::features::routines::{
+     routines_delete_handler, routines_detail_handler, routines_list_handler, routines_runs_handler,
+     routines_summary_handler, routines_toggle_handler, routines_trigger_handler,
+@@ -240,6 +241,9 @@ pub async fn start_server(
+             "/api/pairing/{channel}/approve",
+             post(pairing_approve_handler),
+         )
++        // Pickup admin
++        .route("/api/pickup/admin-view", get(pickup_admin_view_handler))
++        .route("/api/pickup/action", post(pickup_action_handler))
+         // Routines
+         .route("/api/routines", get(routines_list_handler))
+         .route("/api/routines/summary", get(routines_summary_handler))
+diff --git a/src/channels/web/features/pickup/mod.rs b/src/channels/web/features/pickup/mod.rs
+new file mode 100644
+index 0000000..28e4f0c
+--- /dev/null
++++ b/src/channels/web/features/pickup/mod.rs
+@@ -0,0 +1,277 @@
++//! Pickup admin API handlers for the Gateway-hosted Simon schedule editor.
++//!
++//! The browser-facing Pickup tab should not talk to the pickup service
++//! directly. These admin-only routes keep the auth boundary inside the
++//! Gateway process, enforce a narrow mutation allowlist, and normalize
++//! service failures into short structured JSON.
++
++use std::env;
++use std::sync::Arc;
++
++use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
++use serde_json::{Value, json};
++
++use crate::channels::web::auth::AdminUser;
++use crate::channels::web::platform::state::GatewayState;
++
++const SERVICE_BASE_URL_ENV: &str = "SIMON_PICKUP_SERVICE_BASE_URL";
++const SERVICE_TOKEN_ENV: &str = "SIMON_PICKUP_SERVICE_TOKEN";
++const PICKUP_ACTION_PATH: &str = "/pickup/actions";
++
++const ACTION_ADD_WEEKLY_SLOT: &str = "add_weekly_slot";
++const ACTION_UPDATE_WEEKLY_SLOT: &str = "update_weekly_slot";
++const ACTION_REMOVE_WEEKLY_SLOT: &str = "remove_weekly_slot";
++const ACTION_APPLY_WEEK_OVERRIDE: &str = "apply_week_override";
++const ACTION_REMOVE_WEEK_OVERRIDE: &str = "remove_week_override";
++const ACTION_APPLY_DAY_OVERRIDE: &str = "apply_day_override";
++const ACTION_REMOVE_DAY_OVERRIDE: &str = "remove_day_override";
++const ACTION_PREVIEW_PICKUP_DAY: &str = "preview_pickup_day";
++const ACTION_GET_PICKUP_ADMIN_VIEW: &str = "get_pickup_admin_view";
++
++fn pickup_error(code: &'static str, message: impl Into<String>) -> Value {
++    json!({
++        "ok": false,
++        "error": {
++            "code": code,
++            "message": message.into(),
++        }
++    })
++}
++
++fn build_service_endpoint() -> Result<String, (StatusCode, Json<Value>)> {
++    let base_url = env::var(SERVICE_BASE_URL_ENV)
++        .map_err(|_| {
++            (
++                StatusCode::SERVICE_UNAVAILABLE,
++                Json(pickup_error(
++                    "PICKUP_SERVICE_NOT_CONFIGURED",
++                    "Pickup admin service base URL is not configured.",
++                )),
++            )
++        })?
++        .trim()
++        .trim_end_matches('/')
++        .to_string();
++
++    if base_url.is_empty() {
++        return Err((
++            StatusCode::SERVICE_UNAVAILABLE,
++            Json(pickup_error(
++                "PICKUP_SERVICE_NOT_CONFIGURED",
++                "Pickup admin service base URL is not configured.",
++            )),
++        ));
++    }
++
++    Ok(format!("{base_url}{PICKUP_ACTION_PATH}"))
++}
++
++fn read_service_token() -> Result<String, (StatusCode, Json<Value>)> {
++    let token = env::var(SERVICE_TOKEN_ENV)
++        .map_err(|_| {
++            (
++                StatusCode::SERVICE_UNAVAILABLE,
++                Json(pickup_error(
++                    "PICKUP_SERVICE_NOT_CONFIGURED",
++                    "Pickup admin service token is not configured.",
++                )),
++            )
++        })?
++        .trim()
++        .to_string();
++
++    if token.is_empty() {
++        return Err((
++            StatusCode::SERVICE_UNAVAILABLE,
++            Json(pickup_error(
++                "PICKUP_SERVICE_NOT_CONFIGURED",
++                "Pickup admin service token is not configured.",
++            )),
++        ));
++    }
++
++    Ok(token)
++}
++
++fn is_allowed_pickup_action(action: &str) -> bool {
++    matches!(
++        action,
++        ACTION_ADD_WEEKLY_SLOT
++            | ACTION_UPDATE_WEEKLY_SLOT
++            | ACTION_REMOVE_WEEKLY_SLOT
++            | ACTION_APPLY_WEEK_OVERRIDE
++            | ACTION_REMOVE_WEEK_OVERRIDE
++            | ACTION_APPLY_DAY_OVERRIDE
++            | ACTION_REMOVE_DAY_OVERRIDE
++            | ACTION_PREVIEW_PICKUP_DAY
++    )
++}
++
++fn validate_pickup_action(payload: &Value) -> Result<&str, (StatusCode, Json<Value>)> {
++    let action = payload
++        .get("action")
++        .and_then(Value::as_str)
++        .map(str::trim)
++        .filter(|value| !value.is_empty())
++        .ok_or_else(|| {
++            (
++                StatusCode::BAD_REQUEST,
++                Json(pickup_error(
++                    "INVALID_PICKUP_ACTION",
++                    "Pickup admin action is required.",
++                )),
++            )
++        })?;
++
++    if !is_allowed_pickup_action(action) {
++        return Err((
++            StatusCode::BAD_REQUEST,
++            Json(pickup_error(
++                "INVALID_PICKUP_ACTION",
++                "Pickup admin action is not allowed from the Gateway UI.",
++            )),
++        ));
++    }
++
++    Ok(action)
++}
++
++fn ensure_object_payload(payload: Value) -> Result<Value, (StatusCode, Json<Value>)> {
++    if payload.is_object() {
++        Ok(payload)
++    } else {
++        Err((
++            StatusCode::BAD_REQUEST,
++            Json(pickup_error(
++                "INVALID_PICKUP_REQUEST",
++                "Pickup admin request body must be a JSON object.",
++            )),
++        ))
++    }
++}
++
++async fn forward_pickup_action(
++    payload: Value,
++) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
++    let endpoint = build_service_endpoint()?;
++    let token = read_service_token()?;
++
++    let response = reqwest::Client::new()
++        .post(endpoint)
++        .bearer_auth(token)
++        .json(&payload)
++        .send()
++        .await
++        .map_err(|error| {
++            tracing::warn!(error = %error, "pickup admin service request failed");
++            (
++                StatusCode::BAD_GATEWAY,
++                Json(pickup_error(
++                    "PICKUP_SERVICE_UNAVAILABLE",
++                    "Pickup admin service is unavailable right now.",
++                )),
++            )
++        })?;
++
++    let status =
++        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
++    let body = response.text().await.map_err(|error| {
++        tracing::warn!(error = %error, "pickup admin service response read failed");
++        (
++            StatusCode::BAD_GATEWAY,
++            Json(pickup_error(
++                "PICKUP_SERVICE_INVALID_RESPONSE",
++                "Pickup admin service returned an unreadable response.",
++            )),
++        )
++    })?;
++
++    let payload = serde_json::from_str::<Value>(&body).map_err(|error| {
++        tracing::warn!(error = %error, "pickup admin service response was not valid JSON");
++        (
++            StatusCode::BAD_GATEWAY,
++            Json(pickup_error(
++                "PICKUP_SERVICE_INVALID_RESPONSE",
++                "Pickup admin service returned an invalid response.",
++            )),
++        )
++    })?;
++
++    Ok((status, Json(payload)))
++}
++
++pub(crate) async fn pickup_admin_view_handler(
++    State(_state): State<Arc<GatewayState>>,
++    AdminUser(_admin): AdminUser,
++) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
++    forward_pickup_action(json!({
++        "action": ACTION_GET_PICKUP_ADMIN_VIEW,
++    }))
++    .await
++}
++
++pub(crate) async fn pickup_action_handler(
++    State(_state): State<Arc<GatewayState>>,
++    AdminUser(_admin): AdminUser,
++    Json(payload): Json<Value>,
++) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
++    let payload = ensure_object_payload(payload)?;
++    let _ = validate_pickup_action(&payload)?;
++    forward_pickup_action(payload).await
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn allowed_pickup_actions_match_gateway_whitelist() {
++        for action in [
++            ACTION_ADD_WEEKLY_SLOT,
++            ACTION_UPDATE_WEEKLY_SLOT,
++            ACTION_REMOVE_WEEKLY_SLOT,
++            ACTION_APPLY_WEEK_OVERRIDE,
++            ACTION_REMOVE_WEEK_OVERRIDE,
++            ACTION_APPLY_DAY_OVERRIDE,
++            ACTION_REMOVE_DAY_OVERRIDE,
++            ACTION_PREVIEW_PICKUP_DAY,
++        ] {
++            assert!(
++                is_allowed_pickup_action(action),
++                "expected {action} to be allowed"
++            );
++        }
++
++        assert!(!is_allowed_pickup_action(ACTION_GET_PICKUP_ADMIN_VIEW));
++        assert!(!is_allowed_pickup_action("plan_pickup_day"));
++    }
++
++    #[test]
++    fn service_endpoint_trims_trailing_slash() {
++        // SAFETY: unit tests run in-process; these env vars are scoped to
++        // the current test binary and reset before the test exits.
++        unsafe {
++            env::set_var(SERVICE_BASE_URL_ENV, "http://127.0.0.1:8787/");
++        }
++        let endpoint = build_service_endpoint().expect("service endpoint");
++        assert_eq!(endpoint, "http://127.0.0.1:8787/pickup/actions");
++        unsafe {
++            env::remove_var(SERVICE_BASE_URL_ENV);
++        }
++    }
++
++    #[test]
++    fn validate_pickup_action_requires_known_action() {
++        let allowed = json!({ "action": ACTION_PREVIEW_PICKUP_DAY });
++        assert_eq!(
++            validate_pickup_action(&allowed).expect("allowed action"),
++            ACTION_PREVIEW_PICKUP_DAY
++        );
++
++        let missing = json!({});
++        assert!(validate_pickup_action(&missing).is_err());
++
++        let unknown = json!({ "action": "get_actor_registry" });
++        assert!(validate_pickup_action(&unknown).is_err());
++    }
++}

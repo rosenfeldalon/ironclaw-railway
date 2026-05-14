@@ -20,12 +20,14 @@ COPY patches/0003-simon-daily-briefing-clean-notifications.patch /tmp/0003-simon
 COPY patches/0004-force-active-wasm-channels.patch /tmp/0004-force-active-wasm-channels.patch
 COPY patches/0005-wasm-channel-shared-workspace-durable-state.patch /tmp/0005-wasm-channel-shared-workspace-durable-state.patch
 COPY patches/0006-web-gateway-reauth-cta.patch /tmp/0006-web-gateway-reauth-cta.patch
+COPY patches/0007-pickup-admin-gateway-api.patch /tmp/0007-pickup-admin-gateway-api.patch
 RUN git apply /tmp/0001-wasm-workspace-reader.patch
 RUN git apply /tmp/0002-recipient-first-notification-routing.patch
 RUN git apply /tmp/0003-simon-daily-briefing-clean-notifications.patch
 RUN git apply /tmp/0004-force-active-wasm-channels.patch
 RUN git apply /tmp/0005-wasm-channel-shared-workspace-durable-state.patch
 RUN git apply /tmp/0006-web-gateway-reauth-cta.patch
+RUN git apply /tmp/0007-pickup-admin-gateway-api.patch
 
 RUN cargo build --release --bin ironclaw
 

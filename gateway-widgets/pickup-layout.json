@@ -1,0 +1,22 @@
+{
+  "tabs": {
+    "order": [
+      "chat",
+      "memory",
+      "projects",
+      "jobs",
+      "missions",
+      "routines",
+      "simon-pickup-admin",
+      "settings"
+    ]
+  },
+  "widgets": {
+    "simon-pickup-admin": {
+      "enabled": true,
+      "config": {
+        "apiBasePath": "/api/pickup"
+      }
+    }
+  }
+}

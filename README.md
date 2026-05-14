@@ -42,6 +42,8 @@ The current wrapper applies these patches in order:
    Simon-specific keep. Restores the host/runtime bridge that mirrors declared channel `durable_workspace_paths` into the shared workspace tree used by `ironclaw memory`, `simon_family_identity`, and `simon_daily_briefing`.
 6. `0006-web-gateway-reauth-cta.patch`
    Simon-specific keep. Fixes the hosted Web Gateway extension card so installed unauthenticated WASM tools surface an auth/reconnect action instead of falling into the misleading `No configuration needed` setup path after an OAuth grant is revoked.
+7. `0007-pickup-admin-gateway-api.patch`
+   Simon-specific keep. Adds admin-only Gateway pickup routes that proxy the Web Gateway Pickup tab to the local or hosted pickup coordination service through `SIMON_PICKUP_SERVICE_BASE_URL` and `SIMON_PICKUP_SERVICE_TOKEN`.
 
 ## Simon Install-Pack Baseline
 
@@ -71,6 +73,75 @@ This wrapper still provides:
 - port separation between the proxy and webhook channel
 - PostgreSQL persistence with pgvector support
 - the `ironclaw` CLI in the running container for diagnostics
+
+## Local Pickup GUI Dev
+
+The Pickup admin GUI is designed to be reviewed locally before any Railway deploy.
+
+### 1. Run the local pickup service
+
+In `/Users/alonr/projects/simon-docs/apps/simon-pickup-coordination`:
+
+```bash
+PATH=/opt/homebrew/bin:$PATH npm install
+PATH=/opt/homebrew/bin:$PATH npm run check
+PATH=/opt/homebrew/bin:$PATH npm test
+
+PORT=8787 \
+DATABASE_URL=postgres://localhost/simon_pickup_local \
+PICKUP_SERVICE_TOKEN=pickup-local-dev-token \
+PATH=/opt/homebrew/bin:$PATH npm start
+```
+
+Use a local Postgres database for this stage. Do not point the GUI at the live Railway pickup database while iterating on the widget.
+
+### 2. Run the wrapper locally
+
+The Gateway patch stack now expects these env vars:
+
+- `SIMON_PICKUP_SERVICE_BASE_URL`
+- `SIMON_PICKUP_SERVICE_TOKEN`
+
+For a host-run local Gateway, point the service URL at:
+
+```text
+http://127.0.0.1:8787
+```
+
+For a Dockerized local Gateway on macOS, point it at:
+
+```text
+http://host.docker.internal:8787
+```
+
+### 3. Sync the repo-owned widget into the workspace
+
+The widget source of truth lives in:
+
+- `gateway-widgets/pickup-layout.json`
+- `gateway-widgets/simon-pickup-admin/manifest.json`
+- `gateway-widgets/simon-pickup-admin/index.js`
+- `gateway-widgets/simon-pickup-admin/style.css`
+
+Push that source into a running Gateway workspace with:
+
+```bash
+GATEWAY_BASE_URL=http://127.0.0.1:8080 \
+GATEWAY_AUTH_TOKEN=<gateway-token> \
+python3 ./scripts/sync-pickup-gateway-widget.py
+```
+
+Use `--dry-run` first if you want to inspect the merged layout before writing it.
+
+### 4. Local validation target
+
+Once the service and Gateway are both local:
+
+- refresh the Web Gateway
+- confirm the `Pickup` tab appears
+- validate baseline CRUD, week/day overrides, and read-only preview against the local-only DB
+
+This slice is local-review first. Do not treat the widget as ready for Railway until the local tab has been reviewed in-browser.
 
 Recommended port split:
 
